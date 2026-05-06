@@ -566,10 +566,32 @@ def phase_cli(python: str) -> bool:
         except Exception:
             _warn("Could not test dry-run")
 
-    # Check if 'obfush' is on PATH
+    # Check if 'obfush' is on PATH (and figure out where it actually lives)
     obfush_path = shutil.which("obfush")
+
+    # Derive where the install actually placed the binary
+    venv_bin_dir = None
+    venv_obfush = None
+    if os.path.isdir(VENV_DIR):
+        venv_bin_dir = os.path.abspath(
+            os.path.join(VENV_DIR, "Scripts" if IS_WINDOWS else "bin")
+        )
+        candidate = os.path.join(
+            venv_bin_dir, "obfush.exe" if IS_WINDOWS else "obfush"
+        )
+        if os.path.isfile(candidate):
+            venv_obfush = candidate
+
     if obfush_path:
         _ok(f"PATH entry          {obfush_path}")
+    elif venv_obfush:
+        _warn(f"'obfush' installed in venv but not on shell PATH")
+        _info(f"Location: {venv_obfush}")
+        if IS_WINDOWS:
+            _info(f"Activate venv: {VENV_DIR}\\Scripts\\activate")
+        else:
+            _info(f"Activate venv: source {VENV_DIR}/bin/activate")
+            _info(f"Or symlink:    ln -sf '{venv_obfush}' ~/.local/bin/obfush")
     else:
         _warn("'obfush' not on PATH — use: python3 -m obfush.cli")
         if IS_LINUX:
