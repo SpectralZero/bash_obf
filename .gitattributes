@@ -1,0 +1,34 @@
+# Default: auto-detect text files and normalize to LF on commit
+* text=auto eol=lf
+
+# Shell scripts MUST be LF — CRLF breaks bash on Linux/Kali
+*.sh        text eol=lf
+*.bash      text eol=lf
+bootstrap.py text eol=lf
+
+# Python sources — LF for cross-platform consistency
+*.py        text eol=lf
+*.pyi       text eol=lf
+
+# Configuration / docs
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+LICENSE     text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+
+# Binary files — never modify
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.zip       binary
+*.tar.gz    binary
+*.tgz       binary

@@ -1,0 +1,87 @@
+PROPRIETARY LICENSE — INTERNAL RED TEAM USE ONLY
+==================================================
+
+Copyright (c) 2026 Spectral0x00. All rights reserved.
+
+obfush — Polymorphic Bash Obfuscation Engine
+
+------------------------------------------------------------------------
+1. GRANT OF USE
+------------------------------------------------------------------------
+
+This software ("obfush") is proprietary and is made available solely for
+internal red team operations, authorized security testing, capture-the-flag
+(CTF) competitions, defensive security research, and educational contexts
+explicitly approved by the copyright holder.
+
+Permission is granted to authorized personnel to use, modify, and operate
+this software within the scope of an authorized engagement only.
+
+------------------------------------------------------------------------
+2. AUTHORIZED USE
+------------------------------------------------------------------------
+
+You MAY use obfush for:
+
+  - Source-code obfuscation of bash scripts you own or are explicitly
+    authorized to obfuscate as part of a sanctioned engagement.
+  - Anti-reverse-engineering hardening of red team payloads under a
+    formal rules-of-engagement document.
+  - Security research, detection engineering, and defensive tooling
+    evaluation.
+  - Educational analysis in controlled lab environments.
+
+------------------------------------------------------------------------
+3. PROHIBITED USE
+------------------------------------------------------------------------
+
+You MAY NOT use obfush for:
+
+  - Unauthorized intrusion into any system, network, or service.
+  - Distribution of malware, ransomware, or any payload intended to
+    cause harm to systems or persons not authorized for testing.
+  - Evasion of monitoring on systems where you do not have explicit,
+    written authorization from the system owner.
+  - Any activity that violates local, national, or international law.
+  - Mass targeting, supply chain compromise, or detection-evasion
+    in support of malicious operations.
+
+The authors disclaim any responsibility for misuse. Use of this tool
+outside an authorized engagement is the sole responsibility of the
+operator and may constitute a criminal offense in many jurisdictions.
+
+------------------------------------------------------------------------
+4. REDISTRIBUTION
+------------------------------------------------------------------------
+
+Redistribution of source or compiled forms is PROHIBITED without prior
+written consent from the copyright holder. Internal mirroring within
+an authorized organization is permitted provided this LICENSE file
+remains intact and unmodified.
+
+------------------------------------------------------------------------
+5. NO WARRANTY
+------------------------------------------------------------------------
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------
+6. SCOPE OF PROTECTION
+------------------------------------------------------------------------
+
+obfush is a SOURCE-CODE obfuscator. It does not, and is not intended to,
+hide RUNTIME behavior. System calls, file writes, network connections,
+and process executions performed by an obfuscated script remain fully
+visible to host-based instrumentation (strace, eBPF, auditd, EDR).
+The operator is responsible for understanding this distinction.
+
+------------------------------------------------------------------------
+                   END OF LICENSE — Spectral0x00, 2026
+------------------------------------------------------------------------

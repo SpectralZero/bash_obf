@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "obfush"
+version = "2.0.0-dev"
+description = "Polymorphic Bash Obfuscation Engine — Red Team Internal Use Only"
+readme = "README.md"
+license = {text = "Proprietary"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Spectral0x00"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Private :: Do Not Upload",
+]
+dependencies = [
+    "bashlex>=0.18",
+    "click>=8.1",
+    "rich>=13.0",
+    "xxhash",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+]
+
+[project.scripts]
+obfush = "obfush.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["obfush*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

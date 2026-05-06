@@ -1,0 +1,101 @@
+# ─── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.manifest
+*.spec
+MANIFEST
+
+# ─── Virtual environments ──────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ─── Testing & coverage ────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+
+# ─── Type checkers / linters ───────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+.pytype/
+
+# ─── IDEs & editors ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.spyderproject
+.spyproject
+.ropeproject
+
+# ─── Jupyter ───────────────────────────────────────────────────────────
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# ─── obfush specific ───────────────────────────────────────────────────
+# Generated obfuscated output
+*_obfuscated.sh
+*_obf.sh
+op_out*.sh
+out.sh
+output.sh
+
+# Verifier sandbox artifacts
+.obfush_sandbox/
+.obfush_cache/
+
+# Debug AST dumps
+ast_dump_*.json
+*.ast.json
+
+# Local seed/config overrides
+.obfush_local.yaml
+local_config.yaml
+
+# ─── OS / system ───────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+nul
+
+# ─── Documentation builds ──────────────────────────────────────────────
+docs/_build/
+site/
