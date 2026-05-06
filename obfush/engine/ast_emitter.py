@@ -77,11 +77,42 @@ def _emit_assignment(node: dict, depth: int) -> str:
     # (e.g., bashlex kept it as name='x="hello"'), reconstruct properly
     if not value and "=" in name:
         return name  # Already in name=value form
-    # Ensure value is properly quoted if it's a bare string with spaces
-    if value and not value.startswith(('"', "'", '$', '(', '`')):
-        if ' ' in value or '\t' in value:
-            value = f'"{value}"'
+    # Quoting policy:
+    #   - Already quoted (' or "): leave as-is
+    #   - Pure command substitution / arithmetic / process-sub starting the value:
+    #     $(...), $((...)), `...`, <(...), >(...) — these self-delimit
+    #   - Anything else with whitespace, glob chars, or non-ASCII: wrap in "..."
+    if value and isinstance(value, str):
+        already_quoted = value.startswith(('"', "'"))
+        self_delim = (
+            value.startswith("$(") or value.startswith("$((") or
+            value.startswith("`") or value.startswith("<(") or value.startswith(">(")
+        ) and (
+            value.endswith(")") or value.endswith("`")
+        ) and " " not in _strip_balanced(value)
+        needs_quoting = (
+            not already_quoted
+            and not self_delim
+            and any(ch in value for ch in (' ', '\t', '*', '?', '[', '{', '<', '>', '|', '&', ';', '(', ')', "'", '\\'))
+            or any(ord(ch) > 127 for ch in value)  # non-ASCII (em-dash, unicode)
+        )
+        if needs_quoting and not already_quoted:
+            # Escape any embedded double quotes
+            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+            value = f'"{escaped}"'
     return f"{name}={value}"
+
+
+def _strip_balanced(s: str) -> str:
+    """Return s with the outermost matching brackets/parens stripped, for self-delim check."""
+    if not s or len(s) < 2:
+        return s
+    pairs = {'(': ')', '[': ']', '{': '}', '`': '`'}
+    if s[0] == '$' and len(s) > 2 and s[1] in pairs and s[-1] == pairs[s[1]]:
+        return s[2:-1]
+    if s[0] in pairs and s[-1] == pairs[s[0]]:
+        return s[1:-1]
+    return s
 
 
 def _emit_list(node: dict, depth: int) -> str:

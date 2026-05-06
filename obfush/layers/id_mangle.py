@@ -188,15 +188,102 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
     if not mangle_map:
         return ast
 
-    # Build regex for word-boundary replacement in string values
-    sorted_names = sorted(mangle_map.keys(), key=len, reverse=True)
-    pattern = re.compile(
-        r'(?<!\w)(' + '|'.join(re.escape(n) for n in sorted_names) + r')(?!\w)'
+    # Replace ONLY in expansion contexts:
+    #   $name, ${name}, ${name:-x}, ${!name}, ${#name}, ${name#pat}, etc.
+    # AND inside arithmetic expansion: $((...)), $[...], (( ... ))
+    # Bare identifiers in literal text (e.g. inside "x ($x) > 5") are LEFT ALONE.
+    param_pattern = re.compile(
+        r'\$\{[!#]?([a-zA-Z_]\w*)'   # ${name, ${!name, ${#name
+        r'|\$([a-zA-Z_]\w*)'         # $name
+    )
+    arith_pattern = re.compile(r'\$\(\((.*?)\)\)', re.DOTALL)
+    arith_alt_pattern = re.compile(r'\$\[(.*?)\]', re.DOTALL)
+    # Standalone arithmetic command:  (( ... ))   — must not match $(()) (handled above)
+    arith_cmd_pattern = re.compile(r'(?<!\$)\(\((.*?)\)\)', re.DOTALL)
+    bare_id = re.compile(r'\b([a-zA-Z_]\w*)\b')
+    # Assignment LHS — at start of any line (after optional indent) OR at start of token.
+    # Matches:  name=val,  name+=val,  name[i]=val,  declare name=val,  for name in ...
+    # MULTILINE so it scans every line in opaque-blob fallback case too.
+    # Group 1 = boundary, Group 2 = optional keyword (declare/local/etc.) — captured
+    # so we can put it back, Group 3 = identifier, Group 4 = operator.
+    assign_lhs_pattern = re.compile(
+        r'(?m)(^|[\s;&|(])'
+        r'((?:declare(?:\s+-[aAilrtuxn]+)?\s+|local\s+|export\s+|readonly\s+|typeset\s+)?)'
+        r'([a-zA-Z_]\w*)(\+?=|\[\w+\]=)'
+    )
+    # for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
+    for_iter_pattern = re.compile(
+        r'(?m)\bfor\s+(?:\(\(\s*)?([a-zA-Z_]\w*)\b'
+    )
+    # function definition LHS:  function name() { ... }   |   name() { ... }
+    func_def_pattern = re.compile(
+        r'(?m)(^|[\s;&])(?:function\s+([a-zA-Z_]\w*)|([a-zA-Z_]\w*)\s*\(\s*\))'
     )
 
+    def _mangle_arith_inner(inner: str) -> str:
+        return bare_id.sub(
+            lambda m: mangle_map.get(m.group(1), m.group(1)),
+            inner,
+        )
+
     def _mangle_string(s: str) -> str:
-        """Replace identifiers in a string value."""
-        return pattern.sub(lambda m: mangle_map.get(m.group(1), m.group(1)), s)
+        """Replace identifiers only in expansion / arithmetic / assignment contexts.
+
+        Multiline-safe: scans every line so it works correctly both for
+        per-node word values AND for the opaque-blob fallback (whole script
+        in a single word when bashlex can't parse it).
+        """
+        # 0a. Assignment LHS — handles  name=,  name+=,  name[i]=,
+        #                    declare/local/export/readonly/typeset NAME=
+        def _assign_repl(m: re.Match) -> str:
+            boundary, keyword, name, op = m.group(1), m.group(2), m.group(3), m.group(4)
+            if name in mangle_map:
+                return f"{boundary}{keyword}{mangle_map[name]}{op}"
+            return m.group(0)
+        s = assign_lhs_pattern.sub(_assign_repl, s)
+
+        # 0b. for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
+        def _for_repl(m: re.Match) -> str:
+            name = m.group(1)
+            if name in mangle_map:
+                full = m.group(0)
+                return full[: -len(name)] + mangle_map[name]
+            return m.group(0)
+        s = for_iter_pattern.sub(_for_repl, s)
+
+        # 0c. Function definition:  function NAME() {…}  |  NAME() {…}
+        def _func_repl(m: re.Match) -> str:
+            name = m.group(2) or m.group(3)
+            if name and name in mangle_map:
+                full = m.group(0)
+                # Replace only the name token; keep the sep and parens
+                return full.replace(name, mangle_map[name], 1)
+            return m.group(0)
+        s = func_def_pattern.sub(_func_repl, s)
+
+        # 1. Arithmetic expansion: rename bare identifiers within $((...))
+        def _arith_repl(m: re.Match) -> str:
+            return f"$(({_mangle_arith_inner(m.group(1))}))"
+        s = arith_pattern.sub(_arith_repl, s)
+        # 2. Older-style arithmetic: $[...]
+        def _arith_alt_repl(m: re.Match) -> str:
+            return f"$[{_mangle_arith_inner(m.group(1))}]"
+        s = arith_alt_pattern.sub(_arith_alt_repl, s)
+
+        # 3. Standalone arithmetic command: (( ... ))
+        def _arith_cmd_repl(m: re.Match) -> str:
+            return f"(({_mangle_arith_inner(m.group(1))}))"
+        s = arith_cmd_pattern.sub(_arith_cmd_repl, s)
+
+        # 4. Parameter expansion: $name and ${...name...}
+        def _param_repl(m: re.Match) -> str:
+            name = m.group(1) or m.group(2)
+            if name in mangle_map:
+                full = m.group(0)
+                # Replace the trailing identifier portion only
+                return full[: -len(name)] + mangle_map[name]
+            return m.group(0)
+        return param_pattern.sub(_param_repl, s)
 
     def _walk(node: dict) -> dict:
         if not isinstance(node, dict):

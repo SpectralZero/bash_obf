@@ -156,10 +156,12 @@ def _convert_node(node: Any) -> dict:
         )
 
     elif kind == "function":
-        name = node.name
-        body = _convert_node(node.body) if hasattr(node, "body") else _node("noop")
-        parts = [_convert_node(p) for p in node.parts] if hasattr(node, "parts") else []
-        return _function_def(name=name, body=body if not parts else parts[0], pos=node.pos)
+        # bashlex: node.name is a WordNode, node.body is the compound block.
+        name_node = getattr(node, "name", None)
+        name = getattr(name_node, "word", "") if name_node is not None else ""
+        body_node = getattr(node, "body", None)
+        body = _convert_node(body_node) if body_node is not None else _node("noop")
+        return _function_def(name=name, body=body, pos=node.pos)
 
     elif kind == "redirect":
         redirect_type = getattr(node, "type", ">")
@@ -195,8 +197,13 @@ def _convert_node(node: Any) -> dict:
         return _heredoc(body=body, delimiter=delimiter, pos=node.pos)
 
     elif kind == "assignment":
-        name = getattr(node, "name", "")
-        value = getattr(node, "value", "")
+        # bashlex stores assignments as a single .word like 'name=value';
+        # .name/.value are not populated — split it ourselves.
+        word = getattr(node, "word", "") or ""
+        if "=" in word:
+            name, _, value = word.partition("=")
+        else:
+            name, value = word, ""
         return _assignment(name=name, value=value, pos=node.pos)
 
     else:

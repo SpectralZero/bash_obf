@@ -92,7 +92,16 @@ MATRIX: dict[str, dict[str, Compat]] = {
 ORDERING_RULES: list[tuple[str, str]] = [
     ("flow-obfusc", "junk-inject"),    # flow restructuring before dead code
     ("flow-obfusc", "indirection"),    # flow before indirection
-    ("encode", "entropy-mask"),         # encode before entropy dilution
+    # entropy-mask injects raw bash decoy text that must pass through verbatim.
+    # All AST-rewriting / string-mangling layers must run BEFORE it, otherwise
+    # they corrupt the decoys (e.g. str-shred hex-escaping the decoy LHS).
+    ("encode", "entropy-mask"),
+    ("str-shred", "entropy-mask"),
+    ("cmd-sub", "entropy-mask"),
+    ("id-mangle", "entropy-mask"),
+    ("junk-inject", "entropy-mask"),
+    ("indirection", "entropy-mask"),
+    ("flow-obfusc", "entropy-mask"),
 ]
 
 
