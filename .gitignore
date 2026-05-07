@@ -99,3 +99,4 @@ nul
 # ─── Documentation builds ──────────────────────────────────────────────
 docs/_build/
 site/
+.claude/

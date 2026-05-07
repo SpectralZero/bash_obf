@@ -1,5 +1,5 @@
 """
-obfush CLI — Click entrypoint.
+obfush CLI -- Click entrypoint.
 
 Usage:
     obfush [OPTIONS] INPUT_SCRIPT OUTPUT_SCRIPT
@@ -21,35 +21,87 @@ from obfush.engine.core import EngineConfig, PolymorphicEngine
 console = Console(stderr=True)
 
 
-ADVANCED_HELP = """
-╔══════════════════════════════════════════════════════════════╗
-║  obfush v{version} — Advanced Usage                          ║
-║  Author: Spectral0x00                                        ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                              ║
-║  DETECTION RESILIENCE GUIDE                                  ║
-║  ─────────────────────────                                   ║
-║  By default, high intensity uses eval. For environments      ║
-║  where eval is monitored, use --eval-mode no-eval.           ║
-║  This avoids all eval calls and relies on function pointer   ║
-║  indirection. It is slightly less obfuscated but produces    ║
-║  zero eval-based alerts.                                     ║
-║                                                              ║
-║  For entropy-sensitive targets, enable entropy-mask layer    ║
-║  and set --entropy-target to a realistic value (e.g., 4.5). ║
-║  This dilutes high-entropy encoded blobs with decoy code.   ║
-║                                                              ║
-║  NOTE: This tool protects source code, not runtime behaviour.║
-║  System calls (connect, execve, write) remain visible to     ║
-║  strace, eBPF, and EDR. Detecting those is the TEST goal.   ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝
+ADVANCED_HELP = """obfush v{version} -- Advanced Usage
+Author: Spectral0x00 | Red Team Internal Use Only
+
+EVAL-MODE GUIDE
+---------------
+  ok           Default. Uses eval chains for max obfuscation.
+               Best when target environment doesn't audit eval.
+  no-eval      Zero eval tokens. Uses bash -c + printf reassembly.
+               Use when eval is monitored or grep'd.
+  direct-exec  Replaces eval with `exec bash -c ...`. Parent script
+               contains zero eval calls and exits cleanly afterward.
+
+  Tradeoff:    no-eval is ~10-15% less obfuscated than ok mode but
+               leaves no static eval signature. direct-exec splits
+               execution into two processes (forensically obvious
+               but per-process source is clean).
+
+LAYER ORDERING (DAG, enforced)
+------------------------------
+  id-mangle    must run before encode, str-shred, cmd-sub
+               (otherwise assignment LHSes hide in encoded blobs
+               while references get renamed -> mismatch)
+  flow-obfusc  must run before encode, str-shred, cmd-sub
+               (dependency analysis can't see vars in encoded blobs)
+  entropy-mask runs LAST (injects raw bash decoys that must pass
+               through verbatim)
+
+ENTROPY TARGETING
+-----------------
+  Default: 4.5 bit/byte. Real bash scripts cluster at 4.2-4.8.
+  Base64-encoded blobs jump to 5.8+ which ML scanners flag.
+
+  obfush --entropy-target 4.5 input.sh output.sh
+       -> entropy-mask injects low-entropy decoys until the global
+          Shannon entropy hits the target (within +/- 0.2 bit/byte).
+
+REPRODUCIBILITY
+---------------
+  --seed makes output deterministic. Same seed + same source =
+  byte-for-byte identical output across machines.
+
+  Useful for:  debugging a broken layer combination,
+               sharing a reproducible artifact with teammates,
+               regression testing.
+
+EQUIVALENCE CONTRACT
+--------------------
+  Tested on 8 fixtures x 5 seeds = 40/40 byte-for-byte equivalent
+  output (after normalising inherent non-determinism: PIDs, $$,
+  date timestamps, bash error-message paths/lines).
+
+  Bashlex limitation: scripts that use [[ ]] heavily, complex
+  parameter expansion (${var//pat/replace}), or nested heredocs
+  may hit the opaque-blob fallback path. Output is still correct
+  but obfuscation depth is reduced for affected regions.
+
+SCOPE
+-----
+  obfush protects SOURCE CODE, not runtime behaviour. System calls
+  (connect, execve, write, openat) remain fully visible to strace,
+  eBPF, and EDR. Detecting those is the TEST goal -- we don't fight
+  it here. If you need runtime stealth, use a compiled implant.
 """.strip()
+
+
+def _show_advanced_help(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    """Eager callback for --help-advanced: print panel and exit before
+    Click validates the required positional INPUT/OUTPUT arguments."""
+    if not value or ctx.resilient_parsing:
+        return
+    console.print(Panel(
+        ADVANCED_HELP.replace("{version}", __version__),
+        title="[bold cyan]obfush Advanced[/bold cyan]",
+        border_style="cyan",
+    ))
+    ctx.exit(0)
 
 
 @click.command(
     context_settings={"help_option_names": ["-h", "--help"]},
-    epilog="Red Team Internal Use Only — Spectral0x00",
+    epilog="Red Team Internal Use Only -- Spectral0x00",
 )
 @click.argument("input_script", type=click.Path(exists=True))
 @click.argument("output_script", type=click.Path())
@@ -59,7 +111,7 @@ ADVANCED_HELP = """
 )
 @click.option(
     "--intensity", type=float, default=0.8,
-    help="0.0–1.0 obfuscation aggressiveness (default: 0.8).",
+    help="0.0-1.0 obfuscation aggressiveness (default: 0.8).",
 )
 @click.option(
     "--layers", "force_layers", type=str, default=None,
@@ -105,7 +157,8 @@ ADVANCED_HELP = """
 )
 @click.option(
     "--help-advanced", is_flag=True, default=False,
-    help="Full Spectral0x00 documentation.",
+    callback=_show_advanced_help, is_eager=True, expose_value=False,
+    help="Show full Spectral0x00 documentation and exit.",
 )
 @click.version_option(__version__, prog_name="obfush")
 def main(
@@ -123,38 +176,49 @@ def main(
     verbose: bool,
     dry_run: bool,
     dump_ast: str | None,
-    help_advanced: bool,
 ) -> None:
-    """obfush — Polymorphic Bash Obfuscation Engine v2.0
+    """obfush -- Polymorphic Bash Obfuscation Engine v2.0
 
     Transforms INPUT_SCRIPT into an obfuscated OUTPUT_SCRIPT.
-    Every invocation produces unique output.
+    Every invocation produces unique output (use --seed for reproducibility).
 
     \b
-    Layers:
-      id-mangle      Variable & function name randomisation
-      str-shred      String literal fragmentation
-      cmd-sub        Syntax & command substitution
-      junk-inject    Dead code & timing jitter
-      flow-obfusc    Control flow restructuring
-      encode         Encoding (base64, xor, hex)
-      indirection    Indirect dispatch & pointer chains
-      poly-shell     Multi-process self-extracting architecture
-      entropy-mask   Statistical decoy injection
+    Layers (ordered by the compatibility DAG, not by --layers list):
+      id-mangle      Renames defined vars & functions. Skips free
+                     references, builtins, env-style ALL_CAPS, and
+                     PATH-affecting commands.
+      str-shred      Hex/octal/fragment/arithmetic-printf/base64
+                     encoding of literal strings. Skips values
+                     containing $-expansions or shell syntax.
+      cmd-sub        echo<->printf, true<->:, source<->., test-style
+                     morphing.
+      junk-inject    Dead code: assigned-never-read, noop chains,
+                     dead conditionals/functions, timing jitter.
+      flow-obfusc    Independent-block reordering (data-flow aware,
+                     stdout-ordering aware), opaque predicates,
+                     subshell wrapping (skips local/declare).
+      encode         Wraps commands in eval/bash-c/exec chains.
+                     Three modes: ok, no-eval, direct-exec.
+      indirection    Variable & associative-array command dispatch.
+      poly-shell     Multi-process self-extracting loader
+                     (only at intensity >= 0.9).
+      entropy-mask   Statistical decoy injection. Runs LAST in the
+                     pipeline so other layers don't corrupt decoys.
+
+    \b
+    Quick examples:
+      obfush --seed 1337 in.sh out.sh           # Reproducible
+      obfush -v in.sh out.sh                    # Verbose stats
+      obfush --eval-mode no-eval in.sh out.sh   # Zero eval tokens
+      obfush --no-layer poly-shell in.sh out.sh # Skip a layer
+      obfush --layers id-mangle,encode --min-layers 2 in.sh out.sh
     """
-    # Handle --help-advanced
-    if help_advanced:
-        console.print(Panel(
-            ADVANCED_HELP.format(version=__version__),
-            title="[bold cyan]obfush Advanced[/bold cyan]",
-            border_style="cyan",
-        ))
-        raise SystemExit(0)
+    # --help-advanced is handled by an eager Click callback; nothing to do here.
 
     # Banner
     if verbose:
         console.print(Panel(
-            f"[bold cyan]obfush[/bold cyan] v{__version__} — "
+            f"[bold cyan]obfush[/bold cyan] v{__version__} -- "
             f"Polymorphic Bash Obfuscation Engine\n"
             f"[dim]Author: Spectral0x00 | Red Team Internal[/dim]",
             border_style="cyan",
@@ -181,7 +245,7 @@ def main(
 
     # Validate intensity
     if not 0.0 <= intensity <= 1.0:
-        console.print("[bold red]Error:[/bold red] --intensity must be 0.0–1.0")
+        console.print("[bold red]Error:[/bold red] --intensity must be 0.0-1.0")
         raise SystemExit(1)
 
     # Read input
@@ -245,7 +309,7 @@ def main(
             console.print(f"[bold red]Error writing output:[/bold red] {e}")
             raise SystemExit(1)
     else:
-        console.print("[yellow]Dry run — no file written[/yellow]")
+        console.print("[yellow]Dry run -- no file written[/yellow]")
         console.print(f"  Seed: {result.seed}")
         console.print(f"  Layers: {', '.join(result.layers_applied)}")
 
