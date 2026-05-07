@@ -84,16 +84,22 @@ def _encode_command(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
 def _encode_eval(cmd_str: str, rng: random.Random, stats: LayerStats) -> dict:
     """Encode using eval chain (eval_mode='ok')."""
     # Note: xor_base64 was removed because it required python3 at runtime,
-    # which isn't guaranteed on minimal targets. Stick to bash-native tools.
-    method = rng.choice(["base64", "hex"])
+    # which isn't guaranteed on minimal targets.  The hex method previously
+    # used xxd which also isn't guaranteed on minimal systems (Alpine,
+    # minimal containers, some WSL installs).  Both methods now use only
+    # bash builtins + coreutils (base64, printf).
+    method = rng.choice(["base64", "hex_printf"])
 
     if method == "base64":
         encoded = base64.b64encode(cmd_str.encode()).decode()
         decode_cmd = f"eval \"$(echo '{encoded}' | base64 -d)\""
 
-    elif method == "hex":
-        hex_str = cmd_str.encode().hex()
-        decode_cmd = f"eval \"$(echo '{hex_str}' | xxd -r -p)\""
+    elif method == "hex_printf":
+        # Build a printf format string with \xNN escapes — bash-native,
+        # no xxd dependency.  Inside printf's single-quoted argument,
+        # one backslash is needed:  printf '\x65\x63\x68\x6f'  → "echo"
+        hex_parts = "".join(f"\\x{b:02x}" for b in cmd_str.encode())
+        decode_cmd = f"eval \"$(printf '{hex_parts}')\""
 
     stats.regions_encoded += 1
     stats.nodes_modified += 1

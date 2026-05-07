@@ -47,26 +47,37 @@ class LayerImpl(Layer):
 
 
 def _collect_identifiers(ast: dict) -> set[str]:
-    """Walk AST and collect all user-defined identifiers."""
-    identifiers: set[str] = set()
+    """Walk AST and collect all user-defined identifiers.
+
+    Only identifiers that are **defined** somewhere in the script (via
+    assignment, function definition, or declaration keyword) are returned.
+    Free references — names that appear in ``var_refs`` but are never
+    assigned — are excluded.  Renaming a free reference is a functional
+    no-op (``${undefined_var}`` expands to the same empty string regardless
+    of its name), but it corrupts literal text that happens to contain
+    the same name (e.g. ``echo "value of \\${var}"`` where bashlex strips
+    the backslash, leaving ``var`` in ``var_refs``).
+    """
+    defined: set[str] = set()
+    referenced: set[str] = set()
 
     def _walk(node: dict) -> None:
         if not isinstance(node, dict):
             return
 
-        # Assignments
+        # Assignments — LHS is a definition
         if node.get("type") == "assignment":
             name = node.get("name", "")
             if name and _is_mangleable(name):
-                identifiers.add(name)
+                defined.add(name)
 
         # Function definitions
         if node.get("type") == "function_def":
             name = node.get("name", "")
             if name and _is_mangleable(name):
-                identifiers.add(name)
+                defined.add(name)
 
-        # Local declarations
+        # Local/declare/export/readonly/typeset declarations
         if node.get("type") == "command":
             parts = node.get("parts", [])
             if (parts and parts[0].get("type") == "word"
@@ -77,18 +88,18 @@ def _collect_identifiers(ast: dict) -> set[str]:
                         name = val.split("=")[0].lstrip("-")
                         # Strip declare flags like -a, -A, -i, -r, -x
                         if name and not name.startswith("-") and _is_mangleable(name):
-                            identifiers.add(name)
+                            defined.add(name)
                     elif val and not val.startswith("-") and _is_mangleable(val):
-                        identifiers.add(val)
+                        defined.add(val)
                     if part.get("type") == "assignment":
                         name = part.get("name", "")
                         if name and _is_mangleable(name):
-                            identifiers.add(name)
+                            defined.add(name)
 
-        # Variable references from normaliser annotations
+        # Variable references — collect but don't add to final set yet
         for ref in node.get("var_refs", []):
             if _is_mangleable(ref):
-                identifiers.add(ref)
+                referenced.add(ref)
 
         # Recurse
         for key in ("parts", "body", "test_parts"):
@@ -101,7 +112,11 @@ def _collect_identifiers(ast: dict) -> set[str]:
                 _walk(val)
 
     _walk(ast)
-    return identifiers
+
+    # Only mangle names that are actually defined in this script.
+    # References to undefined names are left as-is — they either resolve
+    # to environment/parent-shell variables or to empty string.
+    return defined
 
 
 def _is_mangleable(name: str) -> bool:

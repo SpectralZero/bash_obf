@@ -28,6 +28,11 @@ class LayerImpl(Layer):
         return 1.4 + config.intensity * 0.6
 
 
+# Declaration keywords whose arguments are scope-modifying variable bindings.
+# Wrapping these in a subshell (...) would lose the binding in the parent scope.
+_DECLARATION_KEYWORDS = frozenset({"local", "declare", "typeset", "readonly", "export"})
+
+
 def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     """Walk AST and apply control flow obfuscation."""
     if not isinstance(ast, dict):
@@ -46,12 +51,17 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
             stats.nodes_modified += 1
 
     # ── Opaque predicate wrapping ──
-    if node_type == "command" and rng.random() < config.intensity * 0.3:
+    # Skip nodes marked _no_wrap (compound-condition children — wrapping
+    # them produces invalid bash like  if if [[ ... ]]; then ... fi; then).
+    if (node_type == "command"
+            and not ast.get("_no_wrap")
+            and rng.random() < config.intensity * 0.3):
         ast = _wrap_opaque_predicate(ast, rng)
         stats.nodes_modified += 1
 
     # ── Subshell wrapping ──
     if (node_type == "command"
+            and not ast.get("_no_wrap")
             and rng.random() < config.intensity * 0.2
             and not _has_variable_escape(ast)):
         ast = _wrap_subshell(ast)
@@ -63,6 +73,16 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
         if len(body) > 3 and rng.random() < config.intensity * 0.4:
             ast["body"] = _extract_functions(body, rng)
             stats.nodes_modified += 1
+
+    # ── Mark condition children before recursing into compound nodes ──
+    # In compound if/while/until/for, certain child positions are conditions
+    # that the shell evaluates for truthiness. Wrapping them in opaque
+    # predicates or subshells corrupts the control-flow syntax.
+    # NOTE: use ast.get("type"), NOT node_type — if the node was just wrapped
+    # in an opaque predicate above, node_type is still "command" but ast is
+    # now a compound.  We must mark the NEW compound's conditions too.
+    if ast.get("type") == "compound":
+        _mark_condition_children(ast)
 
     # Recurse
     for key in ("parts", "body", "test_parts"):
@@ -113,6 +133,79 @@ def _is_control_flow_barrier(node: dict) -> bool:
     return False
 
 
+def _mark_condition_children(node: dict) -> None:
+    """Mark children that serve as conditions so they are not wrapped.
+
+    In bashlex-style compound nodes, parts include reservedword tokens
+    ('if', 'then', 'do', etc.) interleaved with conditions and bodies.
+    The condition is the command between the opening keyword and
+    'then' / 'do'. Wrapping it produces invalid bash.
+
+    In synthetic compound nodes (no reservedwords), the condition is
+    conventionally parts[0] (for 'if', 'while', 'until') or not
+    applicable (for '{', '(' groups).
+
+    We take the conservative approach: any command child of a compound
+    that appears BEFORE a 'then' or 'do' keyword is a condition and
+    must not be individually wrapped.  We mark recursively because
+    conditions are often wrapped in intermediate 'list' nodes.
+    """
+    kind = node.get("kind", "")
+    parts = node.get("parts", [])
+    if not parts:
+        return
+
+    # Only relevant for control-flow compounds
+    if kind not in ("if", "while", "until", "for", "case", "select"):
+        return
+
+    # Detect whether parts include explicit reservedword tokens
+    # (bashlex-style) or are synthetic (no keywords, just [condition, body])
+    has_keywords = any(
+        isinstance(p, dict) and p.get("type") == "word"
+        and p.get("value", "") in ("if", "then", "do", "while", "until",
+                                   "for", "elif", "else", "fi", "done",
+                                   "case", "esac", "select")
+        for p in parts
+    )
+
+    if has_keywords:
+        # bashlex-style: mark every non-keyword child that appears before
+        # the first 'then' or 'do' keyword as a condition child.
+        seen_body_keyword = False
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            val = p.get("value", "") if p.get("type") == "word" else ""
+            if val in ("then", "do"):
+                seen_body_keyword = True
+                continue
+            if val in ("elif",):
+                # Reset: the next children until 'then' are a new condition
+                seen_body_keyword = False
+                continue
+            if not seen_body_keyword:
+                _deep_mark_no_wrap(p)
+    else:
+        # Synthetic: parts[0] is the condition for if/while/until
+        if kind in ("if", "while", "until") and len(parts) >= 1:
+            if isinstance(parts[0], dict):
+                _deep_mark_no_wrap(parts[0])
+
+
+def _deep_mark_no_wrap(node: dict) -> None:
+    """Recursively set _no_wrap on a node and all its dict descendants."""
+    node["_no_wrap"] = True
+    for key in ("parts", "body", "test_parts"):
+        val = node.get(key)
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    _deep_mark_no_wrap(item)
+        elif isinstance(val, dict):
+            _deep_mark_no_wrap(val)
+
+
 def _get_var_refs(node: dict) -> set[str]:
     """Collect all variable references (READS) from a node tree.
 
@@ -153,7 +246,12 @@ def _get_var_refs(node: dict) -> set[str]:
 
 
 def _get_var_writes(node: dict) -> set[str]:
-    """Collect all variable assignments from a node tree."""
+    """Collect all variable assignments from a node tree.
+
+    Detects both explicit assignment nodes AND word-style assignments
+    in declaration commands (e.g. ``local url=${1}`` stores ``url`` as
+    a word ``url=${1}`` rather than an assignment node).
+    """
     writes: set[str] = set()
 
     def _walk(n: dict) -> None:
@@ -161,6 +259,25 @@ def _get_var_writes(node: dict) -> set[str]:
             return
         if n.get("type") == "assignment":
             writes.add(n.get("name", ""))
+        # Declaration keywords: local/declare/export/readonly/typeset
+        # Their word arguments are variable bindings that bashlex doesn't
+        # always promote to assignment nodes.
+        if n.get("type") == "command":
+            parts = n.get("parts") or []
+            if (parts and parts[0].get("type") == "word"
+                    and parts[0].get("value", "") in _DECLARATION_KEYWORDS):
+                for p in parts[1:]:
+                    if p.get("type") == "assignment":
+                        writes.add(p.get("name", ""))
+                    elif p.get("type") == "word":
+                        val = p.get("value", "")
+                        if "=" in val:
+                            name = val.split("=", 1)[0].lstrip("-")
+                            if name and not name.startswith("-"):
+                                writes.add(name)
+                        elif val and not val.startswith("-"):
+                            # bare  local varname  (no =value)
+                            writes.add(val)
         for key in ("parts", "body", "test_parts"):
             val = n.get(key)
             if isinstance(val, list):
@@ -234,26 +351,42 @@ def _wrap_opaque_predicate(node: dict, rng: random.Random) -> dict:
     ]
     predicate = rng.choice(predicates)
 
+    # The test command is a condition of this synthetic if — mark it _no_wrap
+    # so that recursion doesn't wrap it in yet another opaque predicate,
+    # which would produce invalid bash:  if if [[ ... ]]; then ... fi; then
+    test_cmd = {
+        "type": "command",
+        "parts": [{"type": "word", "value": predicate, "pos": None}],
+        "pos": None,
+        "_no_wrap": True,
+    }
+
     return {
         "type": "compound",
         "kind": "if",
-        "parts": [
-            {
-                "type": "command",
-                "parts": [{"type": "word", "value": predicate, "pos": None}],
-                "pos": None,
-            },
-            node,
-        ],
+        "parts": [test_cmd, node],
         "pos": None,
         "_opaque": True,
     }
 
 
 def _has_variable_escape(node: dict) -> bool:
-    """Check if a command modifies variables that escape its scope."""
+    """Check if a command modifies variables that escape its scope.
+
+    Returns True for:
+      - Any explicit assignment (name=value)
+      - Declaration commands (local, declare, export, readonly, typeset)
+        — even when bashlex stores the arguments as plain word nodes
+        rather than assignment nodes.
+    """
+    # Fast path: declaration keywords always bind variables in the current
+    # scope.  Wrapping in a subshell (...) would silently lose the binding.
+    if node.get("type") == "command":
+        parts = node.get("parts") or []
+        if (parts and parts[0].get("type") == "word"
+                and parts[0].get("value", "") in _DECLARATION_KEYWORDS):
+            return True
     writes = _get_var_writes(node)
-    # If it assigns to variables, it might need to be in the parent scope
     return bool(writes)
 
 
