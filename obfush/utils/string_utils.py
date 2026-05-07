@@ -155,7 +155,7 @@ def to_arithmetic_printf_simple(s: str) -> str:
     Returns:
         Bash command substitution string.
     """
-    hex_codes = "".join(f"\\\\x{ord(c):02x}" for c in s)
+    hex_codes = "".join(f"\\x{ord(c):02x}" for c in s)
     return f"$(printf '{hex_codes}')"
 
 
@@ -198,9 +198,10 @@ def random_shred(
     if eval_mode == "ok":
         methods.append("base64")
 
-    # Variable reconstruction returns setup + expression
-    if rng.random() < 0.2 and len(s) <= 20:
-        methods.append("variable")
+    # Variable reconstruction is disabled: its setup assignments would need
+    # to be inserted before the use site, but the str-shred layer currently
+    # only annotates them on the node without hoisting them to the script
+    # body. Re-enable once the hoister is implemented.
 
     method = rng.choice(methods)
 

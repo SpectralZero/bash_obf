@@ -83,7 +83,9 @@ def _encode_command(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
 
 def _encode_eval(cmd_str: str, rng: random.Random, stats: LayerStats) -> dict:
     """Encode using eval chain (eval_mode='ok')."""
-    method = rng.choice(["base64", "hex", "xor_base64"])
+    # Note: xor_base64 was removed because it required python3 at runtime,
+    # which isn't guaranteed on minimal targets. Stick to bash-native tools.
+    method = rng.choice(["base64", "hex"])
 
     if method == "base64":
         encoded = base64.b64encode(cmd_str.encode()).decode()
@@ -92,16 +94,6 @@ def _encode_eval(cmd_str: str, rng: random.Random, stats: LayerStats) -> dict:
     elif method == "hex":
         hex_str = cmd_str.encode().hex()
         decode_cmd = f"eval \"$(echo '{hex_str}' | xxd -r -p)\""
-
-    elif method == "xor_base64":
-        key = rng.randint(1, 255)
-        xored = bytes(b ^ key for b in cmd_str.encode())
-        encoded = base64.b64encode(xored).decode()
-        decode_cmd = (
-            f"eval \"$(echo '{encoded}' | base64 -d | "
-            f"python3 -c \"import sys; sys.stdout.buffer.write("
-            f"bytes(b^{key} for b in sys.stdin.buffer.read()))\")\""
-        )
 
     stats.regions_encoded += 1
     stats.nodes_modified += 1

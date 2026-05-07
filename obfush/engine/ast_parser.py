@@ -137,10 +137,14 @@ def _convert_node(node: Any) -> dict:
                         and hasattr(val[0], "kind")):
                     child_nodes = val
                     break
-        # Filter out string tokens (e.g., '|') — only convert node objects
+        # Filter out string tokens (e.g., '|') AND the 'pipe' separator
+        # nodes that bashlex interleaves between piped commands — they're
+        # syntactic separators, not commands.
         parts = [
             _convert_node(p) for p in child_nodes
-            if not isinstance(p, str) and hasattr(p, "kind")
+            if not isinstance(p, str)
+            and hasattr(p, "kind")
+            and p.kind != "pipe"
         ]
         return _pipeline(parts, pos=node.pos)
 
@@ -165,13 +169,26 @@ def _convert_node(node: Any) -> dict:
 
     elif kind == "redirect":
         redirect_type = getattr(node, "type", ">")
-        target = node.output if hasattr(node, "output") else ""
+        # Output may be:
+        #   - a bashlex WordNode (file path, e.g. /dev/null)
+        #   - an integer (target FD, e.g. 1 in `2>&1`)
+        #   - None
+        raw_output = getattr(node, "output", None)
+        if raw_output is None:
+            target: Any = ""
+        elif isinstance(raw_output, int):
+            target = str(raw_output)
+        elif hasattr(raw_output, "kind"):
+            target = _convert_node(raw_output)
+        else:
+            target = str(raw_output)
         fd = getattr(node, "input", None)
         heredoc = None
-        if hasattr(node, "heredoc"):
+        raw_heredoc = getattr(node, "heredoc", None)
+        if raw_heredoc is not None:
             heredoc = _heredoc(
-                body=node.heredoc.value if hasattr(node.heredoc, "value") else str(node.heredoc),
-                delimiter=getattr(node.heredoc, "delimiter", "EOF"),
+                body=getattr(raw_heredoc, "value", str(raw_heredoc)),
+                delimiter=getattr(raw_heredoc, "delimiter", "EOF"),
             )
         return _redirect(redirect_type, target, fd=fd, pos=node.pos, heredoc=heredoc)
 
@@ -206,8 +223,37 @@ def _convert_node(node: Any) -> dict:
             name, value = word, ""
         return _assignment(name=name, value=value, pos=node.pos)
 
+    elif kind in ("if", "while", "until", "for", "case", "select"):
+        # Control-flow constructs — bashlex stores them as a flat list of
+        # parts (reservedwords, conditions, bodies). Recurse into each part
+        # and re-emit them in order. The compound emitter joins with spaces,
+        # which is correct for the typical shell layout.
+        parts = []
+        for attr in ("parts", "list"):
+            if hasattr(node, attr):
+                v = getattr(node, attr)
+                if v:
+                    parts = [_convert_node(p) for p in v]
+                    break
+        return _compound(kind=kind, parts=parts, pos=node.pos)
+
+    elif kind == "reservedword":
+        # Reserved keyword like '{', '}', 'do', 'done', 'then', 'fi', etc.
+        # Emit as a literal word with the keyword text — never the Python repr.
+        word_text = getattr(node, "word", "")
+        return _word(value=word_text, pos=node.pos, raw=word_text)
+
+    elif kind == "operator":
+        op = getattr(node, "op", "")
+        return _node("operator", op=op, pos=getattr(node, "pos", None))
+
     else:
-        # Unknown node — preserve as opaque word with raw content
+        # Unknown node — preserve actual source text via .word if present,
+        # otherwise fall back to str(node) which is the Python repr.
+        word_text = getattr(node, "word", None)
+        if isinstance(word_text, str):
+            return _word(value=word_text, pos=getattr(node, "pos", None),
+                         raw=word_text)
         raw = str(node) if node else ""
         return _word(value=raw, pos=getattr(node, "pos", None), raw=raw)
 

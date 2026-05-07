@@ -304,6 +304,17 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name in mangle_map:
                 node["name"] = mangle_map[name]
 
+        # Function call: command whose first word is an exact identifier
+        # in the mangle map (i.e., the user-defined function name).
+        if node.get("type") == "command":
+            parts = node.get("parts") or []
+            for first in parts:
+                if isinstance(first, dict) and first.get("type") == "word":
+                    val = first.get("value", "")
+                    if val in mangle_map:
+                        first["value"] = mangle_map[val]
+                    break  # only the first word is the command name
+
         # Word values (variable references, command arguments)
         if node.get("type") == "word":
             value = node.get("value", "")

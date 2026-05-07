@@ -8,6 +8,7 @@ Must run BEFORE junk_inject and indirection (compatibility matrix).
 from __future__ import annotations
 
 import random
+import re
 from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
@@ -74,8 +75,53 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     return ast
 
 
+_VAR_REF_RE = re.compile(r'\$\{?!?#?([a-zA-Z_]\w*)')
+
+_BARRIER_COMMANDS = frozenset({
+    "exit", "return", "break", "continue",
+    "trap", "exec", "shift",
+    ".", "source",                       # may load globals at unknown order
+    "set", "shopt", "ulimit", "umask",   # global state
+    "cd", "pushd", "popd",               # CWD-dependent
+})
+
+
+def _is_control_flow_barrier(node: dict) -> bool:
+    """True if reordering past this node would break script semantics.
+
+    Conservative: ANY command except pure variable assignments is a barrier,
+    because most commands have I/O side effects whose order is observable
+    (stdout, stderr, file writes, signals, network calls). Reordering only
+    pure assignments is statically safe; everything else is risky.
+    """
+    if not isinstance(node, dict):
+        return False
+    if node.get("type") == "command":
+        parts = node.get("parts") or []
+        # Pure assignment block: every part is type=='assignment'
+        if parts and all(
+            isinstance(p, dict) and p.get("type") == "assignment"
+            for p in parts
+        ):
+            return False  # safe to reorder
+        # Any other command (echo, printf, cat, custom function, etc.)
+        # has observable side effects — barrier.
+        return True
+    # Compound constructs (if / while / for / case / function / subshell etc.)
+    if node.get("type") in ("compound", "function_def", "list", "pipeline"):
+        return True
+    return False
+
+
 def _get_var_refs(node: dict) -> set[str]:
-    """Collect all variable references from a node tree."""
+    """Collect all variable references (READS) from a node tree.
+
+    Notes:
+      - Assignment NAMEs are writes, not reads — we scan the assignment
+        VALUE for $-references instead.
+      - Word values are scanned with the same regex (covers the
+        opaque-blob fallback case where bashlex couldn't parse).
+    """
     refs: set[str] = set()
 
     def _walk(n: dict) -> None:
@@ -83,9 +129,17 @@ def _get_var_refs(node: dict) -> set[str]:
             return
         refs.update(n.get("var_refs", []))
         if n.get("type") == "assignment":
-            refs.add(n.get("name", ""))
+            value = n.get("value", "")
+            if isinstance(value, str):
+                refs.update(_VAR_REF_RE.findall(value))
         if n.get("type") == "expansion" and n.get("kind") == "parameter":
-            refs.add(n.get("value", ""))
+            v = n.get("value", "")
+            if isinstance(v, str):
+                refs.add(v)
+        if n.get("type") == "word":
+            value = n.get("value", "")
+            if isinstance(value, str):
+                refs.update(_VAR_REF_RE.findall(value))
         for key in ("parts", "body", "test_parts"):
             val = n.get(key)
             if isinstance(val, list):
@@ -126,19 +180,28 @@ def _reorder_independent_blocks(body: list[dict], rng: random.Random) -> list[di
     for node in body:
         reads = _get_var_refs(node) - _get_var_writes(node)
         writes = _get_var_writes(node)
-        blocks.append({"node": node, "reads": reads, "writes": writes})
+        is_barrier = _is_control_flow_barrier(node)
+        blocks.append({
+            "node": node, "reads": reads, "writes": writes,
+            "barrier": is_barrier,
+        })
 
-    # Find groups of independent blocks (no shared variables)
+    # Find groups of independent blocks (no shared variables, no barrier)
     result: list[dict] = []
     independent_group: list[dict] = []
 
     for i, block in enumerate(blocks):
         can_reorder = True
+        # Control-flow barriers (exit, return, break, continue, trap)
+        # MUST keep their original position relative to surrounding blocks.
+        if block["barrier"]:
+            can_reorder = False
         for other in independent_group:
             # Check if this block depends on any block in the group
             if (block["reads"] & other["writes"]
                     or block["writes"] & other["reads"]
-                    or block["writes"] & other["writes"]):
+                    or block["writes"] & other["writes"]
+                    or other["barrier"]):
                 can_reorder = False
                 break
 

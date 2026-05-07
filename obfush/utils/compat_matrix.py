@@ -92,6 +92,21 @@ MATRIX: dict[str, dict[str, Compat]] = {
 ORDERING_RULES: list[tuple[str, str]] = [
     ("flow-obfusc", "junk-inject"),    # flow restructuring before dead code
     ("flow-obfusc", "indirection"),    # flow before indirection
+    # id-mangle MUST run before any layer that hides assignment LHS or
+    # command names inside opaque encoded blobs (encode, str-shred). Otherwise
+    # references like ${count} get renamed but the encoded `count=42`
+    # assignment stays literal — they no longer match at runtime.
+    ("id-mangle", "encode"),
+    ("id-mangle", "str-shred"),
+    ("id-mangle", "cmd-sub"),
+    # flow-obfusc must also run BEFORE encode — flow's dependency analysis
+    # (subshell-wrap, reorder) walks the AST looking for var writes; if
+    # encode has already wrapped them in `eval "..."` blobs, the writes are
+    # invisible and flow-obfusc may incorrectly wrap them in subshells,
+    # losing the variable scope.
+    ("flow-obfusc", "encode"),
+    ("flow-obfusc", "str-shred"),
+    ("flow-obfusc", "cmd-sub"),
     # entropy-mask injects raw bash decoy text that must pass through verbatim.
     # All AST-rewriting / string-mangling layers must run BEFORE it, otherwise
     # they corrupt the decoys (e.g. str-shred hex-escaping the decoy LHS).

@@ -60,31 +60,35 @@ class IndirectionDispatcher:
             return self._variable_indirect(cmd_name)
 
     def _variable_indirect(self, cmd_name: str) -> tuple[str, list[dict]]:
-        """Simple variable dispatch: _cXX="cmd"; "${_cXX}" args..."""
+        """Simple variable dispatch: _cXX=cmd; "${_cXX}" args..."""
         var_name = self._next_id()
+        # Value is the raw command name. The emitter will add appropriate
+        # quoting if needed; embedding literal `"..."` would result in
+        # the variable holding "cmd" (with quotes) which bash treats as
+        # a command name including the quote characters.
         setup = {
             "type": "assignment",
             "name": var_name,
-            "value": f'"{cmd_name}"',
+            "value": cmd_name,
             "pos": None,
         }
         self._var_dispatches.append(setup)
         return f'"${{{var_name}}}"', [setup]
 
     def _eval_chain_indirect(self, cmd_name: str) -> tuple[str, list[dict]]:
-        """Eval-based indirection: _a='_b'; _b='cmd'; eval "${!_a}" """
+        """Eval-based indirection: _a=_b; _b=cmd; eval "${!_a}" """
         var_a = self._next_id()
         var_b = self._next_id()
         setup_b = {
             "type": "assignment",
             "name": var_b,
-            "value": f'"{cmd_name}"',
+            "value": cmd_name,
             "pos": None,
         }
         setup_a = {
             "type": "assignment",
             "name": var_a,
-            "value": f'"{var_b}"',
+            "value": var_b,
             "pos": None,
         }
         self._var_dispatches.extend([setup_b, setup_a])

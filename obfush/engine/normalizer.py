@@ -41,7 +41,7 @@ def normalize(ast: dict) -> dict:
 # Pass 1: Unify variable references
 # ──────────────────────────────────────────────────────────────────────
 
-_SIMPLE_VAR_RE = re.compile(r'\$([a-zA-Z_][a-zA-Z0-9_]*)')
+_SIMPLE_VAR_RE = re.compile(r'\$\{?!?#?([a-zA-Z_][a-zA-Z0-9_]*)')
 
 
 def _normalize_variable_refs(ast: dict) -> dict:

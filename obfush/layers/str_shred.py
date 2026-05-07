@@ -54,7 +54,37 @@ def _should_shred(value: str, node: dict) -> bool:
     # Don't shred raw/opaque nodes
     if node.get("raw") and node.get("value") == node.get("raw"):
         return False
+    # Don't shred pre-rendered shell syntax — opaque predicates [[ ... ]],
+    # arithmetic (( ... )), assignments name=val, command-substitution
+    # eval chains, etc.  Shredding the whole construct as one literal
+    # string corrupts it.
+    if _is_shell_syntax_value(value):
+        return False
+    # Don't shred strings that contain shell expansions ($var, ${var},
+    # $(cmd), `cmd`).  Methods like base64-decode-via-substitution do not
+    # re-trigger expansion on the result, so the variables stay literal.
+    if "$" in value or "`" in value:
+        return False
     return True
+
+
+def _is_shell_syntax_value(value: str) -> bool:
+    """Return True for word values that are pre-rendered shell constructs."""
+    if value.startswith("[[") and value.endswith("]]"):
+        return True
+    if value.startswith("((") and value.endswith("))"):
+        return True
+    if value.startswith("[ ") and value.endswith(" ]"):
+        return True
+    # Assignments and array literals
+    if re.match(r'^[a-zA-Z_]\w*\+?=', value):
+        return True
+    # eval / bash -c chains emitted by the encode layer
+    if re.search(r'\beval\s+["\'$]', value):
+        return True
+    if re.search(r'\bbash\s+-c\b', value):
+        return True
+    return False
 
 
 def _shred_value(value: str, config: LayerConfig) -> str | tuple[list[str], str]:

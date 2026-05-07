@@ -7,6 +7,7 @@ and formatted bash that is syntactically valid.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -62,10 +63,187 @@ def _emit_command(node: dict, depth: int) -> str:
 
 
 def _emit_word(node: dict, depth: int) -> str:
-    # If there's a raw field (opaque/fallback node), use it
-    if "raw" in node and node.get("value", "") == node.get("raw", ""):
-        return node["raw"]
-    return node.get("value", "")
+    # Opaque/fallback node: emit verbatim, never quote.
+    # bashlex couldn't parse this region, so 'value' contains valid raw bash
+    # text (possibly mutated by id-mangle's regex). Wrapping it in quotes
+    # would turn it into a literal string and break execution.
+    if "raw" in node:
+        return node.get("value", node["raw"])
+    value = node.get("value", "")
+    if not value:
+        return ""
+    return _shell_quote(value)
+
+
+# Characters that force a word to be quoted to preserve its meaning.
+# Notably: whitespace, glob, redir, pipe, separator, control chars, escapes.
+_QUOTE_REQUIRING = set(" \t\n\r*?[]{}()|&;<>#'\"\\`")
+
+
+def _shell_quote(value: str) -> str:
+    """Re-add shell quoting that bashlex stripped from literal-string words.
+
+    Skips words that already contain shell syntax (assignments, command-subs,
+    arrays, pre-quoted strings, eval chains). Only wraps "naked literal" words
+    whose value contains characters bash would interpret on word-splitting.
+    """
+    # Already quoted? Leave alone.
+    if (value.startswith('"') and value.endswith('"') and len(value) >= 2) or \
+       (value.startswith("'") and value.endswith("'") and len(value) >= 2) or \
+       (value.startswith("$'") and value.endswith("'") and len(value) >= 3) or \
+       (value.startswith('$"') and value.endswith('"') and len(value) >= 3):
+        return value
+
+    # Word that mixes quoted segments with raw expansions:
+    # e.g. str-shred emits  "Hello"$'\x20'"World"  or  $'\x68'"i"
+    # Detect by presence of an opening quote anywhere AND no whitespace
+    # outside quotes — these are valid concatenation expressions.
+    if _is_quoted_concat(value):
+        return value
+
+    # Single self-delimiting expansion: ${...} / $(...) / `...`
+    # Default to double-quoting variable expansions so the value is treated
+    # as one word (preserves intended-quoted bash semantics; bashlex strips
+    # the original quotes so we have to re-add a safe default).
+    if value.startswith("${") and value.endswith("}") and "}" not in value[2:-1]:
+        return f'"{value}"'
+    if (value.startswith("$(") and value.endswith(")")) or \
+       (value.startswith("`") and value.endswith("`")):
+        return value
+
+    # Words that are pre-rendered shell syntax — leave them verbatim.
+    # Detected when the value contains any of these patterns that wouldn't
+    # appear in a "literal string the user wrote in quotes".
+    if _is_shell_syntax(value):
+        return value
+
+    # Otherwise this looks like a literal that bashlex stripped quotes from.
+    needs_quote = any(ch in _QUOTE_REQUIRING for ch in value) or \
+                  any(ord(ch) < 32 for ch in value) or \
+                  any(ord(ch) > 127 for ch in value)
+    if not needs_quote:
+        return value
+
+    has_expansion = "$" in value or "`" in value
+    if has_expansion:
+        # Don't escape $ — preserve expansions. Escape `\` and `"` only.
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    else:
+        escaped = value.replace("'", "'\\''")
+        return f"'{escaped}'"
+
+
+def _is_quoted_concat(value: str) -> bool:
+    """Detect mixed-quote concatenations like  "He"$'\\x6c\\x6c'"o"  or  $'\\x68'"i".
+
+    These are valid bash word concatenations produced by str-shred. They must
+    pass through verbatim — wrapping them in outer quotes breaks them.
+    """
+    if "'" not in value and '"' not in value:
+        return False
+    # Walk the value and ensure every char is inside SOME quote/escape segment
+    # OR is a continuation between adjacent segments (zero whitespace outside).
+    i = 0
+    n = len(value)
+    while i < n:
+        ch = value[i]
+        if ch == "'":
+            # Find matching '
+            j = value.find("'", i + 1)
+            if j < 0:
+                return False
+            i = j + 1
+        elif ch == '"':
+            # Find matching " (respect \" escapes)
+            j = i + 1
+            while j < n:
+                if value[j] == '\\' and j + 1 < n:
+                    j += 2
+                    continue
+                if value[j] == '"':
+                    break
+                j += 1
+            if j >= n:
+                return False
+            i = j + 1
+        elif ch == "$" and i + 1 < n and value[i + 1] in ("'", '"'):
+            # ANSI-C quote $'...' or locale-translated $"..."
+            quote = value[i + 1]
+            j = i + 2
+            while j < n:
+                if value[j] == '\\' and j + 1 < n:
+                    j += 2
+                    continue
+                if value[j] == quote:
+                    break
+                j += 1
+            if j >= n:
+                return False
+            i = j + 1
+        elif ch == "$" and i + 1 < n and value[i + 1] == "(":
+            # $(...) — find matching )
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if value[j] == '(':
+                    depth += 1
+                elif value[j] == ')':
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                return False
+            i = j
+        elif ch in (" ", "\t", "\n"):
+            return False  # bare whitespace = not a single concat word
+        elif ch == "$" and i + 1 < n and value[i + 1] == "{":
+            # ${var...} — find matching }
+            j = value.find("}", i + 2)
+            if j < 0:
+                return False
+            i = j + 1
+        elif ch in "()|&;<>":
+            # Bash metachars outside quotes break the "single word" property.
+            return False
+        else:
+            # Permit any other "literal connector" between quoted segments:
+            # letters, digits, %, -, +, /, =, ., ,, :, etc. These can
+            # legitimately appear between concatenated quoted strings (e.g.
+            # printf format specs like  %s$'\\x6e'  or  3+$'\\x34').
+            i += 1
+    return True
+
+
+def _is_shell_syntax(value: str) -> bool:
+    """Heuristic: does this word value contain pre-rendered shell syntax?
+
+    True when the word looks like something a layer rendered (assignment,
+    array literal, eval chain, conditional, redirection) rather than a
+    quoted literal.
+    """
+    # Conditional / arithmetic constructs:  [[ ... ]]   ((  ...  ))   [ ... ]
+    if value.startswith("[[") and value.endswith("]]"):
+        return True
+    if value.startswith("((") and value.endswith("))"):
+        return True
+    # Bracketed test that won't be confused with array index: starts with `[ `
+    if value.startswith("[ ") and value.endswith(" ]"):
+        return True
+    # Array literal:  name=(...)  or  name+=(...)
+    if re.search(r'^[a-zA-Z_]\w*\+?=\(', value):
+        return True
+    # Bare assignment with $ expansion:  name="..."  or  name=$(...)
+    if re.search(r'^[a-zA-Z_]\w*\+?=', value) and ('$' in value or '`' in value or '"' in value or "'" in value):
+        return True
+    # Commands embedded as text (encode/cmd-sub layer output)
+    if re.search(r'\beval\s+["\'$]', value):
+        return True
+    if re.search(r'\bbash\s+-c\s+["\'$]', value):
+        return True
+    # Pipeline-looking text:  cmd | cmd  or  cmd && cmd
+    if re.search(r'\s\|\s|\s&&\s|\s\|\|\s', value):
+        return True
+    return False
 
 
 def _emit_assignment(node: dict, depth: int) -> str:
@@ -83,21 +261,27 @@ def _emit_assignment(node: dict, depth: int) -> str:
     #     $(...), $((...)), `...`, <(...), >(...) — these self-delimit
     #   - Anything else with whitespace, glob chars, or non-ASCII: wrap in "..."
     if value and isinstance(value, str):
-        already_quoted = value.startswith(('"', "'"))
+        already_quoted = (
+            value.startswith(('"', "'"))
+            or value.startswith("$'") or value.startswith('$"')
+        )
         self_delim = (
             value.startswith("$(") or value.startswith("$((") or
             value.startswith("`") or value.startswith("<(") or value.startswith(">(")
         ) and (
             value.endswith(")") or value.endswith("`")
         ) and " " not in _strip_balanced(value)
+        # If the value is a quoted concatenation (e.g. shred output:
+        # "He"$'\\x6c\\x6c'"o"  or  $'\\x34\\x32'  or  %s$'\\x6e' ), pass through.
+        is_concat = _is_quoted_concat(value)
         needs_quoting = (
             not already_quoted
             and not self_delim
-            and any(ch in value for ch in (' ', '\t', '*', '?', '[', '{', '<', '>', '|', '&', ';', '(', ')', "'", '\\'))
-            or any(ord(ch) > 127 for ch in value)  # non-ASCII (em-dash, unicode)
+            and not is_concat
+            and (any(ch in value for ch in (' ', '\t', '*', '?', '[', '{', '<', '>', '|', '&', ';', '(', ')', "'", '\\'))
+                 or any(ord(ch) > 127 for ch in value))
         )
-        if needs_quoting and not already_quoted:
-            # Escape any embedded double quotes
+        if needs_quoting:
             escaped = value.replace('\\', '\\\\').replace('"', '\\"')
             value = f'"{escaped}"'
     return f"{name}={value}"
@@ -143,20 +327,85 @@ def _emit_compound(node: dict, depth: int) -> str:
         return "{\n" + inner + "\n}"
     elif kind == "(":
         return "(\n" + inner + "\n)"
-    elif kind == "if":
-        return _emit_if_compound(node, depth)
-    elif kind == "for":
-        return _emit_for_compound(node, depth)
-    elif kind == "while":
-        return _emit_while_compound(node, depth)
-    elif kind == "until":
-        return _emit_until_compound(node, depth)
-    elif kind == "case":
-        return _emit_case_compound(node, depth)
+    elif kind in ("if", "while", "until", "for", "case", "select"):
+        # Two possible AST shapes for control-flow compound nodes:
+        #   A) Synthetic (entropy-mask, etc.): parts = [test, body, ...]
+        #      with NO reservedwords — emitter adds the keywords.
+        #   B) bashlex: parts = [ReservedwordNode('if'), test, RW('then'),
+        #      body, RW('fi')] — reservedwords are explicit children.
+        # Detect by checking if the first part is a reservedword keyword.
+        if _has_explicit_keywords(parts, kind):
+            return _emit_bashlex_control_flow(parts, depth)
+        # Synthetic — dispatch to the kind-specific emitter
+        if kind == "if":
+            return _emit_if_compound(node, depth)
+        elif kind == "for":
+            return _emit_for_compound(node, depth)
+        elif kind == "while":
+            return _emit_while_compound(node, depth)
+        elif kind == "until":
+            return _emit_until_compound(node, depth)
+        elif kind == "case":
+            return _emit_case_compound(node, depth)
+        return inner
     elif kind == "[[":
         return "[[ " + inner + " ]]"
     else:
         return inner
+
+
+_CONTROL_KEYWORDS = frozenset({
+    "if", "then", "elif", "else", "fi",
+    "while", "until", "do", "done",
+    "for", "in", "case", "esac", "select",
+})
+
+
+def _has_explicit_keywords(parts: list, kind: str) -> bool:
+    """True if parts[] starts with a bashlex-style reservedword keyword."""
+    if not parts:
+        return False
+    first = parts[0]
+    if not isinstance(first, dict):
+        return False
+    if first.get("type") != "word":
+        return False
+    return first.get("value", "") == kind or first.get("value", "") in _CONTROL_KEYWORDS
+
+
+def _emit_bashlex_control_flow(parts: list, depth: int) -> str:
+    """Emit a flat bashlex-style control flow whose parts include the
+    reservedword keywords. Strategy: join children with newlines so each
+    keyword starts a new line, but keep the condition next to its opening
+    keyword via a semicolon.
+    """
+    out: list[str] = []
+    for i, p in enumerate(parts):
+        if not isinstance(p, dict):
+            continue
+        emitted = _emit_node(p, depth + 1)
+        if emitted == "":
+            continue
+        out.append(emitted)
+    # Layout pass: keywords like 'do' / 'then' should follow ';' from the
+    # previous list (condition); 'done' / 'fi' / 'esac' should be on their
+    # own line. We use the source order from `out` and add the connectors.
+    rendered: list[str] = []
+    for i, tok in enumerate(out):
+        if tok in ("do", "then"):
+            # Attach to previous via ';' if previous didn't end in keyword
+            # AND doesn't already end in ';' or '\n' (avoids double `;;`).
+            if rendered and rendered[-1] not in _CONTROL_KEYWORDS:
+                prev = rendered[-1].rstrip()
+                connector = "; " if not prev.endswith((";", "\n", "&")) else " "
+                rendered[-1] = prev + connector + tok
+            else:
+                rendered.append(tok)
+        elif tok in ("done", "fi", "esac", "else", "elif"):
+            rendered.append("\n" + tok)
+        else:
+            rendered.append(tok)
+    return " ".join(rendered).replace(" \n", "\n").replace("  ", " ")
 
 
 def _emit_if_compound(node: dict, depth: int) -> str:

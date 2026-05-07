@@ -107,35 +107,17 @@ def _morph_echo(ast: dict, rng: Any) -> dict:
     parts = ast.get("parts", [])
     args = parts[1:] if len(parts) > 1 else []
 
-    choice = rng.choice(["printf", "cat_herestring"])
-
-    if choice == "printf":
-        # echo "x" → printf '%s\n' "x"
-        new_parts = [
-            {"type": "word", "value": "printf", "pos": None},
-            {"type": "word", "value": "'%s\\n'", "pos": None},
-        ]
-        new_parts.extend(args)
-        ast["parts"] = new_parts
-
-    elif choice == "cat_herestring":
-        # echo "x" → cat <<< "x"
-        # Only works for single-argument echo
-        if len(args) == 1:
-            new_parts = [
-                {"type": "word", "value": "cat", "pos": None},
-                {"type": "word", "value": "<<<", "pos": None},
-            ]
-            new_parts.extend(args)
-            ast["parts"] = new_parts
-        else:
-            # Fall back to printf for multi-arg
-            new_parts = [
-                {"type": "word", "value": "printf", "pos": None},
-                {"type": "word", "value": "'%s\\n'", "pos": None},
-            ]
-            new_parts.extend(args)
-            ast["parts"] = new_parts
+    # Note: 'cat <<<' substitution was removed because the `<<<` here-string
+    # operator only works when bash parses it as syntax — once it travels
+    # through the AST as a word value and gets shredded by later layers,
+    # bash sees it as a literal argument and the substitution silently fails.
+    # printf is a safe equivalent that round-trips through all layers.
+    new_parts = [
+        {"type": "word", "value": "printf", "pos": None},
+        {"type": "word", "value": "%s\\n", "pos": None},
+    ]
+    new_parts.extend(args)
+    ast["parts"] = new_parts
 
     return ast
 
