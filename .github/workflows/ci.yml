@@ -1,0 +1,194 @@
+name: obfush CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly full matrix at 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      matrix:
+        description: 'Matrix size: light or full'
+        required: false
+        default: 'light'
+        type: choice
+        options: [light, full]
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Unit tests — always run first, fast gate
+  # ─────────────────────────────────────────────────────────────────
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short
+
+  # ─────────────────────────────────────────────────────────────────
+  # Native fixture assertions — run all fixtures in bash, 0 failures
+  # ─────────────────────────────────────────────────────────────────
+  fixture-assertions:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run all fixture scripts natively
+        run: |
+          TOTAL_PASS=0
+          TOTAL_FAIL=0
+          FIXTURE_FAIL=0
+          for f in tests/fixtures/*.sh; do
+            echo "──── $(basename "$f") ────"
+            if bash "$f"; then
+              echo "  ✓ $(basename "$f")"
+            else
+              echo "  ✗ $(basename "$f") FAILED"
+              FIXTURE_FAIL=$((FIXTURE_FAIL + 1))
+            fi
+            echo
+          done
+          echo "═══ Fixture assertion gate: $FIXTURE_FAIL fixture(s) failed ═══"
+          exit $FIXTURE_FAIL
+
+  # ─────────────────────────────────────────────────────────────────
+  # Equivalence — light matrix on push, full on nightly/manual
+  #
+  # Light:  3 seeds (derived from commit SHA) × default intensity
+  #         × default eval-mode = 3 jobs, each testing all 9 fixtures.
+  #         Seeds rotate per commit for drift across the seed space.
+  #
+  # Full:   5 seeds × 3 intensities × 3 eval-modes = 45 jobs (nightly).
+  # ─────────────────────────────────────────────────────────────────
+  equivalence:
+    needs: [unit-tests, fixture-assertions]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Full matrix: 5 seeds × 3 intensities × 3 eval-modes = 45 combos
+        # Light matrix: 3 SHA-derived seeds × default intensity × default eval-mode
+        include: ${{ fromJSON(
+          (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.matrix == 'full'))
+          && '[
+            {"seed":1,"intensity":"0.3","eval_mode":"ok"},
+            {"seed":1,"intensity":"0.8","eval_mode":"ok"},
+            {"seed":1,"intensity":"1.0","eval_mode":"ok"},
+            {"seed":1,"intensity":"0.3","eval_mode":"no-eval"},
+            {"seed":1,"intensity":"0.8","eval_mode":"no-eval"},
+            {"seed":1,"intensity":"1.0","eval_mode":"no-eval"},
+            {"seed":1,"intensity":"0.3","eval_mode":"direct-exec"},
+            {"seed":1,"intensity":"0.8","eval_mode":"direct-exec"},
+            {"seed":1,"intensity":"1.0","eval_mode":"direct-exec"},
+            {"seed":42,"intensity":"0.3","eval_mode":"ok"},
+            {"seed":42,"intensity":"0.8","eval_mode":"ok"},
+            {"seed":42,"intensity":"1.0","eval_mode":"ok"},
+            {"seed":42,"intensity":"0.3","eval_mode":"no-eval"},
+            {"seed":42,"intensity":"0.8","eval_mode":"no-eval"},
+            {"seed":42,"intensity":"1.0","eval_mode":"no-eval"},
+            {"seed":42,"intensity":"0.3","eval_mode":"direct-exec"},
+            {"seed":42,"intensity":"0.8","eval_mode":"direct-exec"},
+            {"seed":42,"intensity":"1.0","eval_mode":"direct-exec"},
+            {"seed":99,"intensity":"0.3","eval_mode":"ok"},
+            {"seed":99,"intensity":"0.8","eval_mode":"ok"},
+            {"seed":99,"intensity":"1.0","eval_mode":"ok"},
+            {"seed":99,"intensity":"0.3","eval_mode":"no-eval"},
+            {"seed":99,"intensity":"0.8","eval_mode":"no-eval"},
+            {"seed":99,"intensity":"1.0","eval_mode":"no-eval"},
+            {"seed":99,"intensity":"0.3","eval_mode":"direct-exec"},
+            {"seed":99,"intensity":"0.8","eval_mode":"direct-exec"},
+            {"seed":99,"intensity":"1.0","eval_mode":"direct-exec"},
+            {"seed":1337,"intensity":"0.3","eval_mode":"ok"},
+            {"seed":1337,"intensity":"0.8","eval_mode":"ok"},
+            {"seed":1337,"intensity":"1.0","eval_mode":"ok"},
+            {"seed":1337,"intensity":"0.3","eval_mode":"no-eval"},
+            {"seed":1337,"intensity":"0.8","eval_mode":"no-eval"},
+            {"seed":1337,"intensity":"1.0","eval_mode":"no-eval"},
+            {"seed":1337,"intensity":"0.3","eval_mode":"direct-exec"},
+            {"seed":1337,"intensity":"0.8","eval_mode":"direct-exec"},
+            {"seed":1337,"intensity":"1.0","eval_mode":"direct-exec"},
+            {"seed":7777,"intensity":"0.3","eval_mode":"ok"},
+            {"seed":7777,"intensity":"0.8","eval_mode":"ok"},
+            {"seed":7777,"intensity":"1.0","eval_mode":"ok"},
+            {"seed":7777,"intensity":"0.3","eval_mode":"no-eval"},
+            {"seed":7777,"intensity":"0.8","eval_mode":"no-eval"},
+            {"seed":7777,"intensity":"1.0","eval_mode":"no-eval"},
+            {"seed":7777,"intensity":"0.3","eval_mode":"direct-exec"},
+            {"seed":7777,"intensity":"0.8","eval_mode":"direct-exec"},
+            {"seed":7777,"intensity":"1.0","eval_mode":"direct-exec"}
+          ]'
+          || '[
+            {"seed":"sha1","intensity":"0.8","eval_mode":"ok"},
+            {"seed":"sha2","intensity":"0.8","eval_mode":"ok"},
+            {"seed":"sha3","intensity":"0.8","eval_mode":"ok"}
+          ]'
+          ) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install obfush
+        run: pip install -e ".[dev]"
+
+      - name: Derive seed from commit SHA (light matrix only)
+        id: seed
+        run: |
+          SHA="${{ github.sha }}"
+          POOL=(1 7 42 99 256 512 1337 2048 4096 7777 9001 31337)
+          raw_seed="${{ matrix.seed }}"
+          if [[ "$raw_seed" == "sha1" ]]; then
+            idx=$(( 16#${SHA:0:8} % ${#POOL[@]} ))
+            echo "value=${POOL[$idx]}" >> "$GITHUB_OUTPUT"
+          elif [[ "$raw_seed" == "sha2" ]]; then
+            idx=$(( 16#${SHA:8:8} % ${#POOL[@]} ))
+            echo "value=${POOL[$idx]}" >> "$GITHUB_OUTPUT"
+          elif [[ "$raw_seed" == "sha3" ]]; then
+            idx=$(( 16#${SHA:16:8} % ${#POOL[@]} ))
+            echo "value=${POOL[$idx]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$raw_seed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run equivalence check
+        env:
+          SEED: ${{ steps.seed.outputs.value }}
+          INTENSITY: ${{ matrix.intensity }}
+          EVAL_MODE: ${{ matrix.eval_mode }}
+        run: |
+          python ci/equivalence_check.py \
+            --seed "$SEED" \
+            --intensity "$INTENSITY" \
+            --eval-mode "$EVAL_MODE"
+
+      - name: Upload failure diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equiv-diff-s${{ steps.seed.outputs.value }}-i${{ matrix.intensity }}-${{ matrix.eval_mode }}
+          path: ci_output/
+          retention-days: 30

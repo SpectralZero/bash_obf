@@ -62,11 +62,22 @@ class LayerImpl(Layer):
 
 
 class DecoyGenerator:
-    """Generates realistic-looking bash code for entropy dilution."""
+    """Generates realistic-looking bash code for entropy dilution.
+
+    Uses the procedural DecoyCorpus for comment/log generation,
+    producing 31,680+ unique strings instead of the original 54
+    static phrases.  Seeded via the master RNG for reproducibility.
+    """
 
     def __init__(self, rng: random.Random) -> None:
         self.rng = rng
         self._counter = 0
+        # Procedural corpus — hard dependency, not optional.
+        # If this import fails, it's a real bug.  The static 54-phrase
+        # corpus is dead; silently falling back would undermine the
+        # 31,680-phrase OPSEC guarantee.
+        from obfush.utils.decoy_corpus import DecoyCorpus
+        self._corpus = DecoyCorpus(rng)
 
     def generate(self) -> dict:
         """Generate a random decoy AST node."""
@@ -111,86 +122,28 @@ class DecoyGenerator:
         }
 
     def _comment_block(self) -> dict:
-        """Realistic-looking noop comment (: "...") — misleading context."""
-        comments = [
-            # Infrastructure / sysadmin
-            "Verify configuration loaded correctly",
-            "Initialize connection pool parameters",
-            "Set default values for optional parameters",
-            "Ensure temp directory exists and is writable",
-            "Parse command line arguments",
-            "Validate SSL certificate chain",
-            "Check systemd service status",
-            "Load environment-specific overrides",
-            "Restart on connection failure",
-            "Wait for upstream service to become healthy",
-            "Rotate log files if size exceeds threshold",
-            "Flush DNS cache before resolution",
-            "Mount encrypted volume if not already present",
-            "Verify checksum of downloaded artifact",
-            "Initialize metrics collection endpoint",
-            "Configure kernel parameters for high throughput",
-            "Set file descriptor limits for worker processes",
-            # Networking
-            "Establish tunnel to relay endpoint",
-            "Negotiate TLS handshake with upstream proxy",
-            "Check MTU settings for interface",
-            "Bind to available port in ephemeral range",
-            "Validate CIDR notation for subnet mask",
-            "Configure iptables rules for NAT traversal",
-            "Resolve hostname through system DNS",
-            # Deployment / CI
-            "Pull latest image from container registry",
-            "Run database migration scripts",
-            "Warm application cache after deployment",
-            "Notify monitoring system of deployment event",
-            "Execute smoke tests against staging endpoint",
-            "Rollback if health check fails within grace period",
-            # Security / auth
-            "Verify HMAC signature on payload",
-            "Check API token expiration",
-            "Rotate credentials if older than 24 hours",
-            "Validate input against injection patterns",
-            "Sanitize user-supplied path components",
-            "Enforce minimum password complexity requirements",
-            # Monitoring / observability
-            "Emit structured log entry for audit trail",
-            "Update Prometheus gauge for queue depth",
-            "Send heartbeat to watchdog process",
-            "Sample CPU and memory utilisation",
-        ]
+        """Realistic-looking noop comment (: "...") — misleading context.
+
+        Uses the procedural DecoyCorpus (31,680+ unique combos).
+        """
+        comment = self._corpus.generate_comment()
         return {
             "type": "command",
             "parts": [
                 {"type": "word", "value": ":", "pos": None},
-                {"type": "word", "value": f'"{self.rng.choice(comments)}"', "pos": None},
+                {"type": "word", "value": f'"{comment}"', "pos": None},
             ],
             "pos": None,
             "_decoy": True,
         }
 
     def _inline_comment(self) -> dict:
-        """Bare # comment line — looks like a real developer comment."""
-        comments = [
-            "# TODO: add retry logic for transient failures",
-            "# FIXME: handle edge case when config is empty",
-            "# NOTE: this timeout value is tuned for production",
-            "# Fallback to default if environment variable is unset",
-            "# Skip validation in debug mode",
-            "# Upstream requires Content-Type: application/json",
-            "# Rate limit: 100 req/s per the API docs",
-            "# See RFC 7231 section 6.5.1 for status code semantics",
-            "# Keep-alive interval must match server configuration",
-            "# Workaround for bash 4.x quoting bug",
-            "# Author: auto-generated configuration block",
-            "# Last verified: 2024-11-15",
-            "# Do not modify — managed by deployment pipeline",
-            "# Ref: internal KB article #4821",
-        ]
-        # Emit as a noop (:) with the comment as a quoted string,
-        # because raw # comments would be stripped by the emitter in
-        # some code paths. The : "# ..." idiom is common in bash.
-        comment = self.rng.choice(comments)
+        """Bare # comment line — looks like a real developer comment.
+
+        Emitted as : "# ..." (noop with quoted comment) since raw
+        # comments would be stripped by the emitter in some code paths.
+        """
+        comment = self._corpus.generate_inline_comment()
         return {
             "type": "command",
             "parts": [
@@ -264,20 +217,13 @@ class DecoyGenerator:
         }
 
     def _log_statement(self) -> dict:
-        """Logger-style statement."""
-        levels = ["INFO", "DEBUG", "TRACE", "NOTICE"]
-        msgs = [
-            "Configuration validated", "Service dependency check passed",
-            "Cache warmed successfully", "Worker thread initialized",
-            "Health check endpoint ready", "Metrics collection started",
-        ]
+        """Logger-style statement — procedural corpus."""
+        msg = self._corpus.generate_log_message()
         return {
             "type": "command",
             "parts": [
                 {"type": "word", "value": ":", "pos": None},
-                {"type": "word", "value":
-                    f'"[{self.rng.choice(levels)}] {self.rng.choice(msgs)}"',
-                    "pos": None},
+                {"type": "word", "value": f'"{msg}"', "pos": None},
             ],
             "pos": None,
             "_decoy": True,
@@ -306,28 +252,39 @@ def _interleave_decoys(
     num_blocks: int,
     rng: random.Random,
 ) -> list[dict]:
-    """Interleave decoy blocks among real code."""
+    """Interleave decoy blocks among real code.
+
+    IMPORTANT: never append decoys AFTER the last real statement.
+    The tail position of the script body determines the exit code.
+    Trailing decoy statements (assignments, noops) would silently
+    override it to 0, breaking scripts that exit with non-zero.
+    """
     if not body:
         return [decoy_gen.generate() for _ in range(num_blocks)]
 
     result: list[dict] = []
-    blocks_per_gap = max(1, num_blocks // (len(body) + 1))
+    # Reserve the last real statement -- nothing goes after it
+    *head, tail = body
+    blocks_per_gap = max(1, num_blocks // (len(head) + 1)) if head else num_blocks
 
-    # Inject some before
-    for _ in range(rng.randint(1, blocks_per_gap)):
+    # Inject some before first real statement
+    for _ in range(rng.randint(1, min(blocks_per_gap, max(1, num_blocks)))):
         result.append(decoy_gen.generate())
         num_blocks -= 1
 
-    for i, node in enumerate(body):
+    for i, node in enumerate(head):
         result.append(node)
-        # Inject between real nodes
+        # Inject between real nodes (but not after the last one in head)
         inject_count = rng.randint(0, min(blocks_per_gap, num_blocks))
         for _ in range(inject_count):
             result.append(decoy_gen.generate())
             num_blocks -= 1
 
-    # Inject remaining at end
+    # Inject remaining BEFORE the tail (not after it)
     for _ in range(max(0, num_blocks)):
         result.append(decoy_gen.generate())
+
+    # Tail is always last -- preserves exit code
+    result.append(tail)
 
     return result

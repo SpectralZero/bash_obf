@@ -100,3 +100,5 @@ nul
 docs/_build/
 site/
 .claude/
+ci_output/
+debug_*.py

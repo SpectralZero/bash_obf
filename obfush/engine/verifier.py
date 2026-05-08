@@ -4,6 +4,9 @@ and compares their behaviour.
 
 On Windows, uses WSL/Git Bash if available. Full container-based
 sandboxing requires a Linux environment.
+
+Normalization is delegated to obfush.engine.normalize (single source
+of truth shared with the CI equivalence checker).
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any
+
+from obfush.engine.normalize import normalize_stdout, normalize_stderr
 
 
 class VerificationError(Exception):
@@ -28,22 +33,25 @@ class Verifier:
     """Sandbox equivalence tester.
 
     Executes original and obfuscated scripts and compares:
-    - stdout (byte-for-byte)
-    - stderr (byte-for-byte)
+    - stdout (after normalization)
+    - stderr (after normalization — warnings only, not failures)
     - exit code
 
     Args:
         timeout: Maximum execution time per script (seconds).
         bash_path: Path to bash executable (auto-detected if None).
+        normalize: Whether to normalize output before comparison.
     """
 
     def __init__(
         self,
         timeout: int = 30,
         bash_path: str | None = None,
+        normalize: bool = True,
     ) -> None:
         self.timeout = timeout
         self.bash_path = bash_path or self._find_bash()
+        self.normalize = normalize
 
     def verify(
         self,
@@ -88,24 +96,35 @@ class Verifier:
         # Run obfuscated
         obf_result = self._run_script(obfuscated_source, stdin_data)
 
+        # Optionally normalise
+        if self.normalize:
+            orig_stdout = normalize_stdout(orig_result["stdout"])
+            obf_stdout = normalize_stdout(obf_result["stdout"])
+            orig_stderr = normalize_stderr(orig_result["stderr"])
+            obf_stderr = normalize_stderr(obf_result["stderr"])
+        else:
+            orig_stdout = orig_result["stdout"]
+            obf_stdout = obf_result["stdout"]
+            orig_stderr = orig_result["stderr"]
+            obf_stderr = obf_result["stderr"]
+
         # Compare
         diff: dict[str, Any] = {}
         match = True
 
-        if orig_result["stdout"] != obf_result["stdout"]:
+        if orig_stdout != obf_stdout:
             diff["stdout"] = {
-                "original": orig_result["stdout"][:500],
-                "obfuscated": obf_result["stdout"][:500],
+                "original": orig_stdout[:500].decode("utf-8", errors="replace"),
+                "obfuscated": obf_stdout[:500].decode("utf-8", errors="replace"),
             }
             match = False
 
-        if orig_result["stderr"] != obf_result["stderr"]:
+        if orig_stderr != obf_stderr:
             diff["stderr"] = {
-                "original": orig_result["stderr"][:500],
-                "obfuscated": obf_result["stderr"][:500],
+                "original": orig_stderr[:500].decode("utf-8", errors="replace"),
+                "obfuscated": obf_stderr[:500].decode("utf-8", errors="replace"),
             }
             # stderr differences are warnings, not failures
-            # (timing jitter, PID differences, etc.)
 
         if orig_result["exit_code"] != obf_result["exit_code"]:
             diff["exit_code"] = {
@@ -122,13 +141,44 @@ class Verifier:
 
         return True
 
+    def verify_json(
+        self,
+        original_source: str,
+        obfuscated_source: str,
+        test_input: str | None = None,
+    ) -> dict:
+        """Like verify(), but returns a structured JSON-ready result
+        suitable for CI consumption instead of raising.
+
+        Returns:
+            dict with keys: passed, stdout_match, exit_code_match,
+            stderr_warning, diff (if any)
+        """
+        try:
+            passed = self.verify(original_source, obfuscated_source, test_input)
+            return {
+                "passed": passed,
+                "stdout_match": True,
+                "exit_code_match": True,
+                "stderr_warning": False,
+                "diff": None,
+            }
+        except VerificationError as e:
+            diff = e.diff or {}
+            return {
+                "passed": False,
+                "stdout_match": "stdout" not in diff,
+                "exit_code_match": "exit_code" not in diff,
+                "stderr_warning": "stderr" in diff,
+                "diff": diff,
+            }
+
     def _run_script(
         self,
         source: str,
         stdin_data: bytes | None = None,
     ) -> dict:
         """Execute a bash script and capture output."""
-        # Write to temp file
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".sh", delete=False, encoding="utf-8",
         ) as f:
@@ -169,7 +219,6 @@ class Verifier:
     def _safe_env(self) -> dict[str, str]:
         """Create a restricted environment for script execution."""
         env = os.environ.copy()
-        # Remove sensitive variables
         for key in ("AWS_SECRET_ACCESS_KEY", "API_KEY", "TOKEN",
                      "PASSWORD", "PRIVATE_KEY"):
             env.pop(key, None)
@@ -178,12 +227,10 @@ class Verifier:
     @staticmethod
     def _find_bash() -> str | None:
         """Auto-detect bash executable."""
-        # Direct lookup
         bash = shutil.which("bash")
         if bash:
             return bash
 
-        # Windows-specific paths
         if platform.system() == "Windows":
             candidates = [
                 r"C:\Windows\System32\bash.exe",           # WSL
