@@ -117,6 +117,11 @@ ORDERING_RULES: list[tuple[str, str]] = [
     ("junk-inject", "entropy-mask"),
     ("indirection", "entropy-mask"),
     ("flow-obfusc", "entropy-mask"),
+    # poly-shell wraps the ENTIRE emitted script in a chunk-loader.
+    # All AST-rewriting layers must complete before poly-shell sees the
+    # output — otherwise their transformations are invisible to it.
+    ("encode", "poly-shell"),
+    ("indirection", "poly-shell"),
 ]
 
 

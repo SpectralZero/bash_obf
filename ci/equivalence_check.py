@@ -48,9 +48,7 @@ from obfush.engine.normalize import normalize_output
 #
 # Format: bare filename (e.g. "operational.sh")
 # Remove the entry once the root cause is fixed.
-QUARANTINE: set[str] = {
-    "operational.sh",  # exit-code divergence under obfuscation -- bisecting layers
-}
+QUARANTINE: set[str] = set()
 
 
 # -- Bash runner -------------------------------------------------------------

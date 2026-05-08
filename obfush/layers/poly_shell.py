@@ -2,8 +2,12 @@
 Layer 8: Poly-Shell Embedding
 
 Transforms the script into a self-extracting loader that reconstructs
-the payload through multiple child bash invocations. No single file
-contains the entire logic.
+the payload through chunk decoding and in-process execution.
+
+Execution method respects --eval-mode:
+  ok         — eval "${chunks}"  (functions stay in scope)
+  no-eval    — source <(printf '%s' "${chunks}")  (no eval token, scope preserved)
+  direct-exec — source <(printf '%s' "${chunks}")  (same as no-eval)
 
 Only activated at intensity >= 0.9 or via explicit --layers poly-shell.
 """
@@ -32,7 +36,7 @@ class LayerImpl(Layer):
         from obfush.engine.ast_emitter import emit
         source = emit(ast)
 
-        # Split into chunks
+        # Split into chunks at line boundaries
         num_chunks = rng.randint(3, min(7, max(3, len(source) // 200)))
         chunks = _split_payload(source, num_chunks, rng)
 
@@ -40,8 +44,8 @@ class LayerImpl(Layer):
         encoded_chunks = _encode_chunks(chunks, rng)
         stats.chunks_created = len(encoded_chunks)
 
-        # Build bootstrap loader AST
-        loader_ast = _build_loader(encoded_chunks, rng)
+        # Build bootstrap loader AST (respects eval_mode)
+        loader_ast = _build_loader(encoded_chunks, rng, config.eval_mode)
         stats.nodes_modified = 1
 
         # Preserve shebang
@@ -57,20 +61,32 @@ class LayerImpl(Layer):
 
 
 def _split_payload(source: str, num_chunks: int, rng: random.Random) -> list[str]:
-    """Split payload into N randomised chunks."""
-    data = source.encode("utf-8")
-    total = len(data)
+    """Split payload into N chunks at line boundaries.
 
-    # Random split points
-    points = sorted(rng.sample(range(1, total), min(num_chunks - 1, total - 1)))
-    points = [0] + points + [total]
+    Splitting at line boundaries (not byte offsets) ensures every chunk
+    is syntactically complete — no broken tokens, keywords, or strings.
+    The emitter outputs one statement per line, so line boundaries are
+    always safe split points.
+    """
+    lines = source.split('\n')
+    total_lines = len(lines)
+
+    if total_lines <= num_chunks:
+        # Fewer lines than chunks — return each line as a chunk
+        return [line + '\n' for line in lines if line]
+
+    # Generate random split points at line boundaries
+    points = sorted(rng.sample(range(1, total_lines), min(num_chunks - 1, total_lines - 1)))
+    points = [0] + points + [total_lines]
 
     chunks = []
     for i in range(len(points) - 1):
-        chunk = data[points[i]:points[i + 1]]
-        chunks.append(chunk)
+        chunk_lines = lines[points[i]:points[i + 1]]
+        chunk = '\n'.join(chunk_lines)
+        if chunk:
+            chunks.append(chunk)
 
-    return [c.decode("utf-8", errors="replace") for c in chunks]
+    return chunks
 
 
 def _encode_chunks(
@@ -110,17 +126,31 @@ def _encode_chunks(
 def _build_loader(
     encoded_chunks: list[dict[str, str]],
     rng: random.Random,
+    eval_mode: str = "ok",
 ) -> dict:
-    """Build a bootstrap loader AST that chains chunk decoding."""
+    """Build a bootstrap loader AST that chains chunk decoding.
+
+    Execution method depends on eval_mode:
+      ok         — eval "${concat}" — keeps functions in scope
+      no-eval    — source <(printf '%s' "${concat}") — no eval token,
+                   scope preserved via process substitution sourcing
+      direct-exec — same as no-eval (source-based)
+
+    Using eval/source instead of bash -c is critical: bash -c creates
+    a child process where function definitions are scoped.  If the
+    encode layer already wrapped individual commands in bash -c calls,
+    those nested children can't see functions from the poly-shell
+    bash -c parent.  eval/source execute in the current shell, so
+    all function definitions remain visible.
+    """
     body: list[dict] = []
 
-    # Approach: store chunks in variables, decode and concatenate, pipe to bash
+    # Assign each decoded chunk to a variable
     chunk_vars = []
     for i, chunk in enumerate(encoded_chunks):
         var_name = f"_c{rng.randint(0x100, 0xffff):04x}"
         chunk_vars.append(var_name)
 
-        # Assign the decode expression to a variable
         body.append({
             "type": "assignment",
             "name": var_name,
@@ -128,14 +158,21 @@ def _build_loader(
             "pos": None,
         })
 
-    # Concatenate all chunks and pipe to bash
+    # Concatenate all chunks
     concat_expr = "".join(f"${{{v}}}" for v in chunk_vars)
+
+    if eval_mode == "ok":
+        # eval keeps everything in the current shell
+        exec_cmd = f'eval "{concat_expr}"'
+    else:
+        # source <(printf ...) — no eval token, scope preserved
+        # printf '%s' ensures no interpretation of escape sequences
+        exec_cmd = f"source <(printf '%s' \"{concat_expr}\")"
+
     body.append({
         "type": "command",
         "parts": [
-            {"type": "word", "value": "bash", "pos": None},
-            {"type": "word", "value": "-c", "pos": None},
-            {"type": "word", "value": f'"{concat_expr}"', "pos": None},
+            {"type": "word", "value": exec_cmd, "pos": None},
         ],
         "pos": None,
     })
