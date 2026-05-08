@@ -45,8 +45,19 @@ LAYER ORDERING (DAG, enforced)
                while references get renamed -> mismatch)
   flow-obfusc  must run before encode, str-shred, cmd-sub
                (dependency analysis can't see vars in encoded blobs)
-  entropy-mask runs LAST (injects raw bash decoys that must pass
-               through verbatim)
+  entropy-mask runs LAST. Decoys are injected BEFORE the tail
+               statement so the script's exit code is preserved.
+
+OPSEC: COMMENT STRIPPING & DECOY INJECTION
+------------------------------------------
+  Pre-processing pass strips ALL comments from the source before
+  parsing -- deterministic regardless of which parser path the
+  script takes. Shebang and quoted '#' chars are preserved.
+
+  entropy-mask then injects misleading decoy comments from a
+  procedural corpus (40 actions x 36 components x 22 contexts =
+  31,680 unique strings). No two obfuscated artifacts share the
+  same decoy set; clustering analysis is defeated by construction.
 
 ENTROPY TARGETING
 -----------------
@@ -68,9 +79,14 @@ REPRODUCIBILITY
 
 EQUIVALENCE CONTRACT
 --------------------
-  Tested on 8 fixtures x 5 seeds = 40/40 byte-for-byte equivalent
-  output (after normalising inherent non-determinism: PIDs, $$,
-  date timestamps, bash error-message paths/lines).
+  Tested on 10 fixtures x 5 seeds = 50/50 byte-for-byte equivalent
+  output (raw, no normalization required after entropy-mask
+  tail-preservation fix).
+
+  CI runs the equivalence check on every push (light matrix:
+  3 SHA-derived seeds) and nightly (full matrix: 5 seeds x 3
+  intensities x 3 eval-modes = 45 jobs). Failure artifacts are
+  retained 30 days for triage.
 
   Bashlex limitation: scripts that use [[ ]] heavily, complex
   parameter expansion (${var//pat/replace}), or nested heredocs
@@ -182,9 +198,14 @@ def main(
     Transforms INPUT_SCRIPT into an obfuscated OUTPUT_SCRIPT.
     Every invocation produces unique output (use --seed for reproducibility).
 
+    Pre-processing strips all source comments deterministically (shebangs
+    preserved). The 9-layer pipeline then runs in a compatibility-DAG
+    order; entropy-mask runs last and never appends decoys after the
+    script's tail statement (preserves exit codes).
+
     \b
-    Layers (ordered by the compatibility DAG, not by --layers list):
-      id-mangle      Renames defined vars & functions. Skips free
+    Layers (DAG-ordered, --layers selects which to enable):
+      id-mangle      Renames DEFINED vars & functions. Skips free
                      references, builtins, env-style ALL_CAPS, and
                      PATH-affecting commands.
       str-shred      Hex/octal/fragment/arithmetic-printf/base64
@@ -196,14 +217,16 @@ def main(
                      dead conditionals/functions, timing jitter.
       flow-obfusc    Independent-block reordering (data-flow aware,
                      stdout-ordering aware), opaque predicates,
-                     subshell wrapping (skips local/declare).
+                     subshell wrapping (skips local/declare/export
+                     so scope-binding commands stay in parent shell).
       encode         Wraps commands in eval/bash-c/exec chains.
                      Three modes: ok, no-eval, direct-exec.
       indirection    Variable & associative-array command dispatch.
       poly-shell     Multi-process self-extracting loader
                      (only at intensity >= 0.9).
-      entropy-mask   Statistical decoy injection. Runs LAST in the
-                     pipeline so other layers don't corrupt decoys.
+      entropy-mask   Procedural decoy injection (31,680-combo corpus).
+                     Runs LAST. Tail statement is sacred -- decoys
+                     never appear after it.
 
     \b
     Quick examples:
@@ -212,6 +235,7 @@ def main(
       obfush --eval-mode no-eval in.sh out.sh   # Zero eval tokens
       obfush --no-layer poly-shell in.sh out.sh # Skip a layer
       obfush --layers id-mangle,encode --min-layers 2 in.sh out.sh
+      obfush --help-advanced                    # Full doc panel
     """
     # --help-advanced is handled by an eager Click callback; nothing to do here.
 
@@ -295,11 +319,11 @@ def main(
                 f.write(result.output)
             if verbose:
                 console.print(
-                    f"\n[bold green]✓ Written to {output_script}[/bold green]"
+                    f"\n[bold green][OK] Written to {output_script}[/bold green]"
                 )
             else:
                 console.print(
-                    f"[green]✓[/green] {output_script} "
+                    f"[green][OK][/green] {output_script} "
                     f"({len(result.output)} bytes, "
                     f"seed={result.seed}, "
                     f"layers={len(result.layers_applied)}, "
