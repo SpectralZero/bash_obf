@@ -80,6 +80,28 @@ _CMD_CALL_RE = re.compile(
     r'(?m)(^[ \t]*|[;&|(][ \t]*|(?:&&|\|\|)[ \t]*)'
     r'([a-zA-Z_]\w*)(?=[ \t]|$|;|&|\||\)|\n)'
 )
+# Bare name after a declaration keyword (no '=' present):
+#   declare -A colors       declare -i count
+#   local var               export MYVAR
+# Used in opaque-blob mode to collect and rename these definitions.
+_DECLARE_BARE_RE = re.compile(
+    r'(?m)((?:declare|local|typeset|readonly|export)'
+    r'(?:\s+-[a-zA-Z]+)*'
+    r'\s+)'
+    r'([a-zA-Z_]\w*)'
+    r'(?![=\[])'
+)
+# Indirect reference values in assignments:  ="identifier", ='identifier',
+# or =identifier (unquoted).  Renames the RHS when it is exactly a known
+# mangled name (function-pointer / eval-indirect patterns).
+# Negative lookbehind prevents false-matching on == and != operators.
+_ASSIGN_INDIRECT_RE = re.compile(
+    r'(?<![=!<>])=\s*'
+    r'(?:"([a-zA-Z_]\w*)"'
+    r"|'([a-zA-Z_]\w*)'"
+    r'|([a-zA-Z_]\w*))'
+    r'(?=[\s;&|\n)"\']|$)'
+)
 
 
 def _collect_identifiers_from_text(text: str) -> set[str]:
@@ -106,6 +128,12 @@ def _collect_identifiers_from_text(text: str) -> set[str]:
     # for-loop iterators (group 1 = C-style, group 2 = list-style)
     for m in _FOR_ITER_RE.finditer(text):
         name = m.group(1) or m.group(2)
+        if name and _is_mangleable(name):
+            found.add(name)
+
+    # Bare names in declaration statements (declare -A name, local var, etc.)
+    for m in _DECLARE_BARE_RE.finditer(text):
+        name = m.group(2)
         if name and _is_mangleable(name):
             found.add(name)
 
@@ -315,6 +343,24 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             return m.group(0)
         s = assign_lhs_pattern.sub(_assign_repl, s)
 
+        # 0a'. Bare names in declaration statements (declare -A name, etc.)
+        def _declare_bare_repl(m: re.Match) -> str:
+            prefix, name = m.group(1), m.group(2)
+            if name in mangle_map:
+                return f"{prefix}{mangle_map[name]}"
+            return m.group(0)
+        s = _DECLARE_BARE_RE.sub(_declare_bare_repl, s)
+
+        # 0a''. Indirect reference values: ="ident", ='ident', =ident
+        #       Renames the RHS when it is exactly a known identifier.
+        def _indirect_repl(m: re.Match) -> str:
+            full = m.group(0)
+            name = m.group(1) or m.group(2) or m.group(3)
+            if name and name in mangle_map:
+                return full.replace(name, mangle_map[name], 1)
+            return full
+        s = _ASSIGN_INDIRECT_RE.sub(_indirect_repl, s)
+
         # 0b. for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
         def _for_repl(m: re.Match) -> str:
             full = m.group(0)
@@ -401,7 +447,15 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                 node["name"] = mangle_map[name]
             # Mangle value if it's a string
             if isinstance(node.get("value"), str):
-                node["value"] = _mangle_string(node["value"])
+                val = node["value"]
+                mangled_val = _mangle_string(val)
+                # Indirect reference: if the entire value is exactly a
+                # user-defined identifier (e.g. func="worker_a", or
+                # var_name="myvar"), rename it.  This preserves eval,
+                # indirect expansion, and function-pointer patterns.
+                if mangled_val in mangle_map:
+                    mangled_val = mangle_map[mangled_val]
+                node["value"] = mangled_val
 
         # Function definition names
         if node.get("type") == "function_def":
@@ -411,14 +465,36 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
 
         # Function call: command whose first word is an exact identifier
         # in the mangle map (i.e., the user-defined function name).
+        # Also: rename variable names in declare/local/export/typeset.
         if node.get("type") == "command":
             parts = node.get("parts") or []
-            for first in parts:
+            if parts:
+                first = parts[0]
                 if isinstance(first, dict) and first.get("type") == "word":
-                    val = first.get("value", "")
-                    if val in mangle_map:
-                        first["value"] = mangle_map[val]
-                    break  # only the first word is the command name
+                    cmd = first.get("value", "")
+
+                    # Function call rename
+                    if cmd in mangle_map:
+                        first["value"] = mangle_map[cmd]
+
+                    # Declaration commands: rename bare variable names
+                    # e.g. declare -A colors -> declare -A _version
+                    elif cmd in ("local", "declare", "typeset", "readonly", "export"):
+                        for part in parts[1:]:
+                            if not isinstance(part, dict) or part.get("type") != "word":
+                                continue
+                            val = part.get("value", "")
+                            if val.startswith("-"):
+                                continue  # skip flags like -A, -i
+                            if "=" in val:
+                                # name=value or name+=value
+                                eq_pos = val.index("=")
+                                lhs = val[:eq_pos].rstrip("+")
+                                if lhs in mangle_map:
+                                    part["value"] = mangle_map[lhs] + val[len(lhs):]
+                            elif val in mangle_map:
+                                # bare name: declare -A name
+                                part["value"] = mangle_map[val]
 
         # Word values (variable references, command arguments)
         if node.get("type") == "word":
