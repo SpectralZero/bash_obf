@@ -84,12 +84,26 @@ _CMD_CALL_RE = re.compile(
 #   declare -A colors       declare -i count
 #   local var               export MYVAR
 # Used in opaque-blob mode to collect and rename these definitions.
+# Statement-position boundary prevents matching inside quoted strings
+# (e.g. pass "declare -i integer attribute" must NOT collect "integer").
 _DECLARE_BARE_RE = re.compile(
-    r'(?m)((?:declare|local|typeset|readonly|export)'
+    r'(?m)((?:^[ \t]*|[;&|(][ \t]*)'
+    r'(?:declare|local|typeset|readonly|export)'
     r'(?:\s+-[a-zA-Z]+)*'
     r'\s+)'
     r'([a-zA-Z_]\w*)'
     r'(?![=\[])'
+)
+# Variable-name arguments to unset/unsetenv — application-only (these
+# commands don't define variables, they remove them).  Not used in
+# collection because unset doesn't create definitions.
+_VARNAME_CMD_RE = re.compile(
+    r'(?m)((?:^[ \t]*|[;&|(][ \t]*)'
+    r'(?:unset|unsetenv)'
+    r'(?:\s+-[a-zA-Z])*'
+    r'\s+)'
+    r'([a-zA-Z_]\w*)'
+    r'(?=[\s;&|\n)>]|$)'
 )
 # Indirect reference values in assignments:  ="identifier", ='identifier',
 # or =identifier (unquoted).  Renames the RHS when it is exactly a known
@@ -351,6 +365,14 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             return m.group(0)
         s = _DECLARE_BARE_RE.sub(_declare_bare_repl, s)
 
+        # 0a-unset. Rename variable names in unset/unsetenv commands.
+        def _varname_cmd_repl(m: re.Match) -> str:
+            prefix, name = m.group(1), m.group(2)
+            if name in mangle_map:
+                return f"{prefix}{mangle_map[name]}"
+            return m.group(0)
+        s = _VARNAME_CMD_RE.sub(_varname_cmd_repl, s)
+
         # 0a''. Indirect reference values: ="ident", ='ident', =ident
         #       Renames the RHS when it is exactly a known identifier.
         def _indirect_repl(m: re.Match) -> str:
@@ -479,7 +501,7 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
 
                     # Declaration commands: rename bare variable names
                     # e.g. declare -A colors -> declare -A _version
-                    elif cmd in ("local", "declare", "typeset", "readonly", "export"):
+                    elif cmd in ("local", "declare", "typeset", "readonly", "export", "unset"):
                         for part in parts[1:]:
                             if not isinstance(part, dict) or part.get("type") != "word":
                                 continue
