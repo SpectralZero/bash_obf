@@ -48,7 +48,7 @@
 ### Windows
 
 ```powershell
-cd Bash\
+cd bash_obf\
 python bootstrap.py          # Autonomous installer -- just run it
 obfush input.sh output.sh
 ```
@@ -56,7 +56,7 @@ obfush input.sh output.sh
 ### Kali / Ubuntu / Debian
 
 ```bash
-cd Bash/
+cd bash_obf/
 python3 bootstrap.py         # Auto-detects PEP 668, creates venv if needed
 source .venv/bin/activate    # Activate (if venv was created)
 obfush input.sh output.sh
@@ -523,12 +523,12 @@ Bash/
 
 This tool is scoped exclusively to **static source code obfuscation** for authorised internal red team operations.
 
-**✅ In scope:**
+** In scope:**
 - Source code transformation to prevent reverse engineering of captured payloads
 - Stripping TTPs, infrastructure markers, and capability indicators
 - Testing EDR/AI detection of obfuscated payloads
 
-**❌ Firmly out of scope:**
+** Firmly out of scope:**
 - Runtime evasion, anti-debugging, anti-analysis
 - Post-exploitation log wiping, history manipulation, timestamp spoofing
 - Distribution outside authorised internal teams
