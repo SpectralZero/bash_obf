@@ -246,6 +246,18 @@ class DecoyGenerator:
         }
 
 
+def _is_shebang_node(node: dict) -> bool:
+    """Check if a node represents a shebang line (#!)."""
+    if node.get("type") == "word":
+        val = node.get("value", "")
+        return val.startswith("#!") or val.startswith("#!/")
+    if node.get("type") == "command":
+        parts = node.get("parts", [])
+        if parts and parts[0].get("type") == "word":
+            return parts[0].get("value", "").startswith("#!")
+    return False
+
+
 def _interleave_decoys(
     body: list[dict],
     decoy_gen: DecoyGenerator,
@@ -254,27 +266,40 @@ def _interleave_decoys(
 ) -> list[dict]:
     """Interleave decoy blocks among real code.
 
-    IMPORTANT: never append decoys AFTER the last real statement.
-    The tail position of the script body determines the exit code.
-    Trailing decoy statements (assignments, noops) would silently
-    override it to 0, breaking scripts that exit with non-zero.
+    Two invariants:
+      1. Shebang (#!) is always the FIRST node -- bash only honors
+         it on line 1.  No decoys injected before it.
+      2. The LAST real statement is always last -- its exit code
+         determines the script's exit code.
     """
     if not body:
         return [decoy_gen.generate() for _ in range(num_blocks)]
 
     result: list[dict] = []
+
+    # Protect shebang: if first node is #!, emit it first, remove from body
+    shebang = None
+    if _is_shebang_node(body[0]):
+        shebang = body[0]
+        body = body[1:]
+        if not body:
+            return [shebang] + [decoy_gen.generate() for _ in range(num_blocks)]
+
+    if shebang:
+        result.append(shebang)
+
     # Reserve the last real statement -- nothing goes after it
     *head, tail = body
     blocks_per_gap = max(1, num_blocks // (len(head) + 1)) if head else num_blocks
 
-    # Inject some before first real statement
+    # Inject some before first real statement (but after shebang)
     for _ in range(rng.randint(1, min(blocks_per_gap, max(1, num_blocks)))):
         result.append(decoy_gen.generate())
         num_blocks -= 1
 
     for i, node in enumerate(head):
         result.append(node)
-        # Inject between real nodes (but not after the last one in head)
+        # Inject between real nodes
         inject_count = rng.randint(0, min(blocks_per_gap, num_blocks))
         for _ in range(inject_count):
             result.append(decoy_gen.generate())

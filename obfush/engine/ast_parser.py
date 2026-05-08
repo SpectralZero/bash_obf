@@ -263,35 +263,263 @@ def _convert_node(node: Any) -> dict:
 # ──────────────────────────────────────────────────────────────────────
 
 # Patterns bashlex can't handle
-_ARITHMETIC_RE = re.compile(r'\$\(\(.*?\)\)', re.DOTALL)
-_COMPLEX_PARAM_RE = re.compile(r'\$\{[^}]*[#%/!@:^,].*?\}', re.DOTALL)
+_ARITHMETIC_EXPR_RE = re.compile(r'\$\(\(.*?\)\)', re.DOTALL)
+_ANSI_C_QUOTE_RE = re.compile(r"\$'(?:[^'\\]|\\.)*'")
+# Simple expansion: ${var}, ${1}, ${#}, ${?}, ${@} etc. -- bashlex handles these.
+_SIMPLE_EXPANSION_RE = re.compile(r'^[a-zA-Z_]\w*$|^\d+$|^[#?$!@*-]$')
+
+
+def _find_complex_params(source: str) -> list[tuple[int, int]]:
+    """Find ${...} expansions that bashlex can't parse, using brace-counting.
+
+    Handles nested braces like ${var/${other}/replacement} correctly,
+    which the old regex approach could not.  Returns a list of (start, end)
+    spans covering the full ``${...}`` token.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(source)
+
+    while i < n - 1:
+        if source[i] == '$' and source[i + 1] == '{':
+            start = i
+            depth = 1
+            j = i + 2
+
+            while j < n and depth > 0:
+                c = source[j]
+                if c == '\\':
+                    j += 2      # skip escaped character
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                j += 1
+
+            if depth == 0:
+                # Content between ${ and }
+                content = source[start + 2 : j - 1]
+                if not _SIMPLE_EXPANSION_RE.match(content):
+                    spans.append((start, j))
+                i = j
+                continue
+
+        i += 1
+
+    return spans
+
+
+def _find_arith_commands(source: str) -> list[tuple[int, int]]:
+    """Find (( ... )) arithmetic commands (NOT $((...)) expressions).
+
+    In bash, )) always terminates the arithmetic command -- there is
+    no nesting of (( )) inside (( )).  So we just scan for the first
+    )) after each ((.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(source)
+
+    while i < n - 1:
+        if source[i] == '(' and source[i + 1] == '(':
+            # Must NOT be preceded by $ (that's $((..)) arithmetic expression)
+            if i > 0 and source[i - 1] == '$':
+                i += 2
+                continue
+
+            start = i
+            j = i + 2
+
+            # Scan for ))
+            while j < n - 1:
+                if source[j] == ')' and source[j + 1] == ')':
+                    spans.append((start, j + 2))
+                    i = j + 2
+                    break
+                j += 1
+            else:
+                i += 1
+                continue
+            continue
+
+        i += 1
+
+    return spans
+
+
+def _find_array_assignments(source: str) -> list[tuple[int, int]]:
+    """Find name=(...) array assignments that bashlex can't parse.
+
+    Uses quote-aware paren-counting so ')' inside quoted strings
+    doesn't terminate the match prematurely.
+    """
+    _ARRAY_START = re.compile(r'[a-zA-Z_]\w*=\(')
+    spans: list[tuple[int, int]] = []
+    n = len(source)
+
+    for m in _ARRAY_START.finditer(source):
+        start = m.start()
+        j = m.end()  # position after the opening (
+        depth = 1
+
+        while j < n and depth > 0:
+            c = source[j]
+            if c == '\\':
+                j += 2
+                continue
+            if c == '"':
+                j += 1
+                while j < n and source[j] != '"':
+                    if source[j] == '\\':
+                        j += 1
+                    j += 1
+            elif c == "'":
+                j += 1
+                while j < n and source[j] != "'":
+                    j += 1
+            elif c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            j += 1
+
+        if depth == 0:
+            spans.append((start, j))
+
+    return spans
+
+
+def _find_double_bracket(source: str) -> list[tuple[int, int]]:
+    """Find [[ ... ]] conditional tests that bashlex can't parse.
+
+    Scans for ``[[`` and finds the matching ``]]``.  Handles nested
+    quotes so ``]]`` inside strings doesn't terminate prematurely.
+    """
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(source)
+
+    while i < n - 1:
+        if source[i] == '[' and source[i + 1] == '[':
+            # Make sure this isn't inside a word (e.g. 'foo[[')
+            if i > 0 and source[i - 1] not in (' ', '\t', '\n', ';', '&', '|', '(', '!'):
+                i += 2
+                continue
+
+            start = i
+            j = i + 2
+
+            while j < n - 1:
+                c = source[j]
+                # Skip quoted strings
+                if c == '"':
+                    j += 1
+                    while j < n and source[j] != '"':
+                        if source[j] == '\\':
+                            j += 1
+                        j += 1
+                elif c == "'":
+                    j += 1
+                    while j < n and source[j] != "'":
+                        j += 1
+                elif c == ']' and source[j + 1] == ']':
+                    spans.append((start, j + 2))
+                    i = j + 2
+                    break
+                j += 1
+            else:
+                i += 1
+                continue
+            continue
+
+        i += 1
+
+    return spans
 
 
 def _preprocess_for_bashlex(source: str) -> tuple[str, dict[str, str]]:
     """Replace constructs bashlex can't parse with placeholders.
 
-    Returns the processed source and a mapping of placeholder → original.
+    Substitution order matters:
+      1. $'...' ANSI-C quoting  -- prevents interference with ${...} scanning
+      2. $((...)) arithmetic expressions  -- prevents confusion with (( ))
+      3. Complex ${...} via brace-counting  -- handles nested braces
+      4. Array assignments name=(...)  -- bashlex can't parse these
+      5. (( ... )) arithmetic commands  -- bare (( )) after $(( )) is gone
+      6. [[ ... ]] double-bracket tests  -- bashlex can't parse these
+
+    Returns the processed source and a mapping of placeholder -> original.
     """
     placeholders: dict[str, str] = {}
     counter = [0]
 
-    def _replace(match: re.Match) -> str:
-        placeholder = f"__OBFUSH_PH_{counter[0]:04d}__"
+    def _make_placeholder(original: str) -> str:
+        ph = f"__OBFUSH_PH_{counter[0]:04d}__"
         counter[0] += 1
-        placeholders[placeholder] = match.group(0)
-        return placeholder
+        placeholders[ph] = original
+        return ph
+
+    def _regex_replace(match: re.Match) -> str:
+        return _make_placeholder(match.group(0))
+
+    def _replace_spans(text: str, spans: list[tuple[int, int]]) -> str:
+        if not spans:
+            return text
+        parts: list[str] = []
+        prev = 0
+        for start, end in spans:
+            parts.append(text[prev:start])
+            parts.append(_make_placeholder(text[start:end]))
+            prev = end
+        parts.append(text[prev:])
+        return "".join(parts)
 
     processed = source
-    processed = _ARITHMETIC_RE.sub(_replace, processed)
-    processed = _COMPLEX_PARAM_RE.sub(_replace, processed)
+
+    # 1. $'...' ANSI-C quoting (all occurrences)
+    processed = _ANSI_C_QUOTE_RE.sub(_regex_replace, processed)
+
+    # 2. $((...)) arithmetic expressions
+    processed = _ARITHMETIC_EXPR_RE.sub(_regex_replace, processed)
+
+    # 3. Complex ${...} via brace-counting (must re-scan after prior subs)
+    processed = _replace_spans(processed, _find_complex_params(processed))
+
+    # 4. Array assignments: name=(...)
+    processed = _replace_spans(processed, _find_array_assignments(processed))
+
+    # 5. (( ... )) arithmetic commands
+    processed = _replace_spans(processed, _find_arith_commands(processed))
+
+    # 6. [[ ... ]] double-bracket conditional tests
+    processed = _replace_spans(processed, _find_double_bracket(processed))
 
     return processed, placeholders
 
 
 def _restore_placeholders(ast: dict, placeholders: dict[str, str]) -> dict:
-    """Walk AST and restore placeholder strings to their original form."""
+    """Walk AST and restore placeholder strings to their original form.
+
+    Handles nested placeholders (a placeholder whose restored value
+    contains another placeholder) by resolving the values first.
+    """
     if not placeholders:
         return ast
+
+    # Pre-resolve nested placeholders: expand inner placeholders in values
+    # until no more expansions are possible.  This ensures that when we
+    # walk the AST, each placeholder restores to fully-resolved text.
+    resolved = dict(placeholders)
+    changed = True
+    while changed:
+        changed = False
+        for ph, val in resolved.items():
+            for inner_ph, inner_val in placeholders.items():
+                if inner_ph in val and inner_ph != ph:
+                    resolved[ph] = val.replace(inner_ph, inner_val)
+                    changed = True
+                    break  # restart scan after mutation
 
     def _walk(node: dict) -> dict:
         if not isinstance(node, dict):
@@ -300,7 +528,7 @@ def _restore_placeholders(ast: dict, placeholders: dict[str, str]) -> dict:
         # Check string values for placeholders
         for key in ("value", "name", "target", "body", "op"):
             if key in node and isinstance(node[key], str):
-                for ph, original in placeholders.items():
+                for ph, original in resolved.items():
                     if ph in node[key]:
                         node[key] = node[key].replace(ph, original)
                         if "raw" not in node:
@@ -397,11 +625,16 @@ def parse_bash(source: str) -> dict:
     try:
         parts = bashlex.parse(processed)
     except Exception as e:
-        # Total fallback: treat the entire script as a single opaque node
-        return _script(body=[_word(
-            value=source, raw=source,
-            pos=(0, len(source)),
+        # Total fallback: treat the (shebang-stripped) script as a single
+        # opaque node, but preserve the shebang separately so the emitter
+        # can put it on line 1 and entropy-mask doesn't inject above it.
+        fallback_ast = _script(body=[_word(
+            value=parse_source, raw=parse_source,
+            pos=(0, len(parse_source)),
         )])
+        if shebang:
+            fallback_ast["shebang"] = shebang
+        return fallback_ast
 
     # Convert bashlex AST to internal format
     body = [_convert_node(part) for part in parts]

@@ -46,18 +46,91 @@ class LayerImpl(Layer):
         return 1.1  # names may be slightly longer
 
 
+# -- Text-pattern regexes (shared by collection + application) ----------------
+# These are used both for structured AST traversal AND for opaque-blob
+# fallback, where the entire script is a single text node.
+
+# Assignment LHS: name=val, name+=val, declare name=val, etc.
+# IMPORTANT: boundary is line-start (with optional leading whitespace) OR
+# a TRUE statement separator (`;`, `&`, `|`, `(`). Spaces alone don't count
+# -- otherwise literal text in echoed strings like `"summary: total=$total"`
+# would match `total=` as if it were an assignment.
+_ASSIGN_LHS_RE = re.compile(
+    r'(?m)(^[ \t]*|[;&|(][ \t]*)'
+    r'((?:declare(?:\s+-[aAilrtuxn]+)?\s+|local\s+|export\s+|readonly\s+|typeset\s+)?)'
+    r'([a-zA-Z_]\w*)(\+?=|\[\w+\]=)'
+)
+# for-loop iterator: for NAME in ... | for (( NAME=... ))
+# Strict: require `in` keyword (list form) OR `((` (C-style) so that
+# literal text `"for loop (list)"` in echo strings doesn't match.
+_FOR_ITER_RE = re.compile(
+    r'(?m)\bfor\s+'
+    r'(?:\(\(\s*([a-zA-Z_]\w*)'    # group 1: C-style  for (( var = ... ))
+    r'|([a-zA-Z_]\w*)\s+in\b)'      # group 2: list-style  for var in ...
+)
+# Function definition: function NAME() { ... } | NAME() { ... }
+_FUNC_DEF_RE = re.compile(
+    r'(?m)(^|[\s;&])(?:function\s+([a-zA-Z_]\w*)|([a-zA-Z_]\w*)\s*\(\s*\))'
+)
+# Command call at statement position: line-start or after a true statement
+# separator, followed by an identifier and a non-letter (space/redirect/end).
+# Used in opaque-blob mode to rename function call sites. The lookup against
+# mangle_map filters out builtins/externals so only user-defined names match.
+_CMD_CALL_RE = re.compile(
+    r'(?m)(^[ \t]*|[;&|(][ \t]*|(?:&&|\|\|)[ \t]*)'
+    r'([a-zA-Z_]\w*)(?=[ \t]|$|;|&|\||\)|\n)'
+)
+
+
+def _collect_identifiers_from_text(text: str) -> set[str]:
+    """Extract defined identifiers from raw source text.
+
+    Used as fallback when bashlex fails and the script is an opaque
+    blob.  Uses the same regexes that the application phase uses,
+    so collection and application are always in sync.
+    """
+    found: set[str] = set()
+
+    # Assignment LHS
+    for m in _ASSIGN_LHS_RE.finditer(text):
+        name = m.group(3)
+        if name and _is_mangleable(name):
+            found.add(name)
+
+    # Function definitions
+    for m in _FUNC_DEF_RE.finditer(text):
+        name = m.group(2) or m.group(3)
+        if name and _is_mangleable(name):
+            found.add(name)
+
+    # for-loop iterators (group 1 = C-style, group 2 = list-style)
+    for m in _FOR_ITER_RE.finditer(text):
+        name = m.group(1) or m.group(2)
+        if name and _is_mangleable(name):
+            found.add(name)
+
+    return found
+
+
 def _collect_identifiers(ast: dict) -> set[str]:
     """Walk AST and collect all user-defined identifiers.
 
     Only identifiers that are **defined** somewhere in the script (via
     assignment, function definition, or declaration keyword) are returned.
-    Free references — names that appear in ``var_refs`` but are never
-    assigned — are excluded.  Renaming a free reference is a functional
-    no-op (``${undefined_var}`` expands to the same empty string regardless
-    of its name), but it corrupts literal text that happens to contain
-    the same name (e.g. ``echo "value of \\${var}"`` where bashlex strips
-    the backslash, leaving ``var`` in ``var_refs``).
+    Free references -- names that appear in ``var_refs`` but are never
+    assigned -- are excluded.
+
+    If the AST is an opaque blob (single word node with ``raw`` set),
+    falls back to regex-based text scanning.
     """
+    # Detect opaque-blob mode: body is a single word node with raw text
+    body = ast.get("body", [])
+    if (len(body) == 1
+            and isinstance(body[0], dict)
+            and body[0].get("type") == "word"
+            and body[0].get("raw") is not None):
+        return _collect_identifiers_from_text(body[0]["raw"])
+
     defined: set[str] = set()
     referenced: set[str] = set()
 
@@ -65,7 +138,7 @@ def _collect_identifiers(ast: dict) -> set[str]:
         if not isinstance(node, dict):
             return
 
-        # Assignments — LHS is a definition
+        # Assignments -- LHS is a definition
         if node.get("type") == "assignment":
             name = node.get("name", "")
             if name and _is_mangleable(name):
@@ -86,7 +159,6 @@ def _collect_identifiers(ast: dict) -> set[str]:
                     val = part.get("value", "") if part.get("type") == "word" else ""
                     if "=" in val:
                         name = val.split("=")[0].lstrip("-")
-                        # Strip declare flags like -a, -A, -i, -r, -x
                         if name and not name.startswith("-") and _is_mangleable(name):
                             defined.add(name)
                     elif val and not val.startswith("-") and _is_mangleable(val):
@@ -96,7 +168,7 @@ def _collect_identifiers(ast: dict) -> set[str]:
                         if name and _is_mangleable(name):
                             defined.add(name)
 
-        # Variable references — collect but don't add to final set yet
+        # Variable references -- collect but don't add to final set yet
         for ref in node.get("var_refs", []):
             if _is_mangleable(ref):
                 referenced.add(ref)
@@ -112,10 +184,6 @@ def _collect_identifiers(ast: dict) -> set[str]:
                 _walk(val)
 
     _walk(ast)
-
-    # Only mangle names that are actually defined in this script.
-    # References to undefined names are left as-is — they either resolve
-    # to environment/parent-shell variables or to empty string.
     return defined
 
 
@@ -221,19 +289,9 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
     # MULTILINE so it scans every line in opaque-blob fallback case too.
     # Group 1 = boundary, Group 2 = optional keyword (declare/local/etc.) — captured
     # so we can put it back, Group 3 = identifier, Group 4 = operator.
-    assign_lhs_pattern = re.compile(
-        r'(?m)(^|[\s;&|(])'
-        r'((?:declare(?:\s+-[aAilrtuxn]+)?\s+|local\s+|export\s+|readonly\s+|typeset\s+)?)'
-        r'([a-zA-Z_]\w*)(\+?=|\[\w+\]=)'
-    )
-    # for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
-    for_iter_pattern = re.compile(
-        r'(?m)\bfor\s+(?:\(\(\s*)?([a-zA-Z_]\w*)\b'
-    )
-    # function definition LHS:  function name() { ... }   |   name() { ... }
-    func_def_pattern = re.compile(
-        r'(?m)(^|[\s;&])(?:function\s+([a-zA-Z_]\w*)|([a-zA-Z_]\w*)\s*\(\s*\))'
-    )
+    assign_lhs_pattern = _ASSIGN_LHS_RE
+    for_iter_pattern = _FOR_ITER_RE
+    func_def_pattern = _FUNC_DEF_RE
 
     def _mangle_arith_inner(inner: str) -> str:
         return bare_id.sub(
@@ -259,11 +317,19 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
 
         # 0b. for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
         def _for_repl(m: re.Match) -> str:
-            name = m.group(1)
-            if name in mangle_map:
-                full = m.group(0)
+            full = m.group(0)
+            # Group 1 is C-style (match ends right after the name);
+            # group 2 is list-style (match continues through ` in`).
+            if m.group(1) and m.group(1) in mangle_map:
+                name = m.group(1)
+                # Match ends with the name token in C-style.
                 return full[: -len(name)] + mangle_map[name]
-            return m.group(0)
+            if m.group(2) and m.group(2) in mangle_map:
+                name = m.group(2)
+                # List-style: match is ``for NAME ... in``. Replace the
+                # captured name in place rather than splicing the tail.
+                return full.replace(name, mangle_map[name], 1)
+            return full
         s = for_iter_pattern.sub(_for_repl, s)
 
         # 0c. Function definition:  function NAME() {…}  |  NAME() {…}
@@ -275,6 +341,30 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                 return full.replace(name, mangle_map[name], 1)
             return m.group(0)
         s = func_def_pattern.sub(_func_repl, s)
+
+        # 0d. Function calls inside $(...): $(func_name ...)
+        #     The first word after $( is the command name.
+        _cmd_sub_call = re.compile(
+            r'\$\(\s*([a-zA-Z_]\w*)'
+        )
+        def _cmd_sub_repl(m: re.Match) -> str:
+            name = m.group(1)
+            if name in mangle_map:
+                full = m.group(0)
+                return full[: -len(name)] + mangle_map[name]
+            return m.group(0)
+        s = _cmd_sub_call.sub(_cmd_sub_repl, s)
+
+        # 0e. Function call sites at statement position (opaque-blob mode).
+        #     `funcname args` where funcname is a user-defined function.
+        #     Builtins/externals are filtered automatically because they're
+        #     never added to mangle_map by _is_mangleable.
+        def _cmd_call_repl(m: re.Match) -> str:
+            boundary, name = m.group(1), m.group(2)
+            if name in mangle_map:
+                return f"{boundary}{mangle_map[name]}"
+            return m.group(0)
+        s = _CMD_CALL_RE.sub(_cmd_call_repl, s)
 
         # 1. Arithmetic expansion: rename bare identifiers within $((...))
         def _arith_repl(m: re.Match) -> str:
