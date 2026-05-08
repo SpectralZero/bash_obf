@@ -7,8 +7,8 @@ set -o pipefail
 
 PASS_COUNT=0
 FAIL_COUNT=0
-function pass() { echo "[PASS] $*"; ((PASS_COUNT++)); }
-function fail() { echo "[FAIL] $*"; ((FAIL_COUNT++)); }
+function pass() { echo "[PASS] $*"; PASS_COUNT=$((PASS_COUNT+1)); }
+function fail() { echo "[FAIL] $*"; FAIL_COUNT=$((FAIL_COUNT+1)); }
 
 # --- 1. Simple echo & strings ---
 echo "=== Basic Output ==="

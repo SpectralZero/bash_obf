@@ -8,8 +8,8 @@ shopt -s extglob
 
 PASS=0
 FAIL=0
-function pass() { echo "[PASS] $*"; ((PASS++)); }
-function fail() { echo "[FAIL] $*"; ((FAIL++)); }
+function pass() { echo "[PASS] $*"; PASS=$((PASS+1)); }
+function fail() { echo "[FAIL] $*"; FAIL=$((FAIL+1)); }
 function cleanup() {
 	rm -f /tmp/obf_test_* 2>/dev/null
 	rm -f /tmp/test_output_* 2>/dev/null
@@ -39,7 +39,7 @@ var="abcdefgh"
 [[ "${var%gh}" == "abcdef" ]] && pass "suffix remove %" || fail "suffix remove %"
 [[ "${var%%d*}" == "abc" ]] && pass "longest suffix remove %%" || fail "longest suffix remove %%"
 [[ "${var/def/XYZ}" == "abcXYZgh" ]] && pass "replace first" || fail "replace first"
-[[ "${var//d/DD}" == "abcDDDDDDgh" ]] && pass "replace all" || fail "replace all"
+[[ "${var//d/DD}" == "abcDDefgh" ]] && pass "replace all" || fail "replace all"
 default="${empty_var:-DEFAULT}"
 [[ "$default" == "DEFAULT" ]] && pass "default value (:-)" || fail "default value (:-)"
 assigned="${empty_var:=ASSIGNED}"

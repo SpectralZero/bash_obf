@@ -8,8 +8,8 @@ set -o pipefail
 
 PASS=0
 FAIL=0
-pass() { echo "[PASS] $*"; ((PASS++)); }
-fail() { echo "[FAIL] $*"; ((FAIL++)); }
+pass() { echo "[PASS] $*"; PASS=$((PASS+1)); }
+fail() { echo "[FAIL] $*"; FAIL=$((FAIL+1)); }
 
 # --- 1. Simple variable name used in a string ---
 tool="hammer"
