@@ -73,6 +73,7 @@ class DecoyGenerator:
         generators = [
             self._var_assignment,
             self._comment_block,
+            self._inline_comment,
             self._conditional_check,
             self._array_ops,
             self._path_check,
@@ -110,22 +111,91 @@ class DecoyGenerator:
         }
 
     def _comment_block(self) -> dict:
-        """Realistic-looking comment."""
+        """Realistic-looking noop comment (: "...") — misleading context."""
         comments = [
-            "# Verify configuration loaded correctly",
-            "# Initialize connection pool parameters",
-            "# Set default values for optional parameters",
-            "# Ensure temp directory exists and is writable",
-            "# Parse command line arguments",
-            "# Validate SSL certificate chain",
-            "# Check systemd service status",
-            "# Load environment-specific overrides",
+            # Infrastructure / sysadmin
+            "Verify configuration loaded correctly",
+            "Initialize connection pool parameters",
+            "Set default values for optional parameters",
+            "Ensure temp directory exists and is writable",
+            "Parse command line arguments",
+            "Validate SSL certificate chain",
+            "Check systemd service status",
+            "Load environment-specific overrides",
+            "Restart on connection failure",
+            "Wait for upstream service to become healthy",
+            "Rotate log files if size exceeds threshold",
+            "Flush DNS cache before resolution",
+            "Mount encrypted volume if not already present",
+            "Verify checksum of downloaded artifact",
+            "Initialize metrics collection endpoint",
+            "Configure kernel parameters for high throughput",
+            "Set file descriptor limits for worker processes",
+            # Networking
+            "Establish tunnel to relay endpoint",
+            "Negotiate TLS handshake with upstream proxy",
+            "Check MTU settings for interface",
+            "Bind to available port in ephemeral range",
+            "Validate CIDR notation for subnet mask",
+            "Configure iptables rules for NAT traversal",
+            "Resolve hostname through system DNS",
+            # Deployment / CI
+            "Pull latest image from container registry",
+            "Run database migration scripts",
+            "Warm application cache after deployment",
+            "Notify monitoring system of deployment event",
+            "Execute smoke tests against staging endpoint",
+            "Rollback if health check fails within grace period",
+            # Security / auth
+            "Verify HMAC signature on payload",
+            "Check API token expiration",
+            "Rotate credentials if older than 24 hours",
+            "Validate input against injection patterns",
+            "Sanitize user-supplied path components",
+            "Enforce minimum password complexity requirements",
+            # Monitoring / observability
+            "Emit structured log entry for audit trail",
+            "Update Prometheus gauge for queue depth",
+            "Send heartbeat to watchdog process",
+            "Sample CPU and memory utilisation",
         ]
         return {
             "type": "command",
             "parts": [
                 {"type": "word", "value": ":", "pos": None},
                 {"type": "word", "value": f'"{self.rng.choice(comments)}"', "pos": None},
+            ],
+            "pos": None,
+            "_decoy": True,
+        }
+
+    def _inline_comment(self) -> dict:
+        """Bare # comment line — looks like a real developer comment."""
+        comments = [
+            "# TODO: add retry logic for transient failures",
+            "# FIXME: handle edge case when config is empty",
+            "# NOTE: this timeout value is tuned for production",
+            "# Fallback to default if environment variable is unset",
+            "# Skip validation in debug mode",
+            "# Upstream requires Content-Type: application/json",
+            "# Rate limit: 100 req/s per the API docs",
+            "# See RFC 7231 section 6.5.1 for status code semantics",
+            "# Keep-alive interval must match server configuration",
+            "# Workaround for bash 4.x quoting bug",
+            "# Author: auto-generated configuration block",
+            "# Last verified: 2024-11-15",
+            "# Do not modify — managed by deployment pipeline",
+            "# Ref: internal KB article #4821",
+        ]
+        # Emit as a noop (:) with the comment as a quoted string,
+        # because raw # comments would be stripped by the emitter in
+        # some code paths. The : "# ..." idiom is common in bash.
+        comment = self.rng.choice(comments)
+        return {
+            "type": "command",
+            "parts": [
+                {"type": "word", "value": ":", "pos": None},
+                {"type": "word", "value": f'"{comment}"', "pos": None},
             ],
             "pos": None,
             "_decoy": True,

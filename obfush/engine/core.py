@@ -79,6 +79,18 @@ class PolymorphicEngine:
         if self.config.verbose:
             self.console.print(f"[dim]Seed: {seed}[/dim]")
 
+        # Step 1b: Strip comments (OPSEC)
+        # Must run BEFORE parsing: removes operator comments, TODOs, author
+        # tags, infrastructure hints.  Shebang is preserved.  This makes
+        # comment leakage deterministic — bashlex would drop comments when
+        # it parses successfully but preserve them in the opaque-blob
+        # fallback, creating non-deterministic privacy.
+        from obfush.engine.comment_strip import strip_comments
+        source = strip_comments(source)
+
+        if self.config.verbose:
+            self.console.print("[dim]Comments stripped (OPSEC)[/dim]")
+
         # Step 2: Parse
         from obfush.engine.ast_parser import parse_bash
         ast = parse_bash(source)
