@@ -41,16 +41,7 @@ from obfush.engine.normalize import normalize_output
 
 
 # -- Quarantine ---------------------------------------------------------------
-# Fixtures listed here have KNOWN equivalence failures under active
-# investigation.  They still run and report, but failures are logged
-# as warnings (not CI-breaking errors).  This keeps bugs visible and
-# tracked without blocking green CI.
-#
-# Format: bare filename (e.g. "operational.sh")
-# Remove the entry once the root cause is fixed.
 QUARANTINE: set[str] = set()
-
-
 # -- Bash runner -------------------------------------------------------------
 
 def _find_bash() -> str | None:
@@ -107,7 +98,6 @@ def check_fixture(
     bash_path: str,
 ) -> dict:
     """Obfuscate a fixture and compare behaviour to original.
-
     Returns a structured dict suitable for JSON serialization:
     {
         fixture, seed, intensity, eval_mode, equivalent,

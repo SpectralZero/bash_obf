@@ -1,6 +1,5 @@
 """
 AST emitter — converts the internal AST back to valid bash source code.
-
 Walks the AST recursively and produces properly quoted, escaped,
 and formatted bash that is syntactically valid.
 """
@@ -13,10 +12,8 @@ from typing import Any
 
 def emit(ast: dict) -> str:
     """Convert AST to bash source code.
-
     Args:
         ast: Internal AST (root should be type='script').
-
     Returns:
         Valid bash source code string.
     """
