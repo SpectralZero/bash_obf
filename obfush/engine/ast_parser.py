@@ -149,6 +149,22 @@ def _protect_loop_variable(parts: list) -> None:
 # Source text set during parse_bash() — used by _convert_node to detect quotes.
 _parse_source: str = ""
 
+
+def _bash_double_dequote(s: str) -> str:
+    """De-escape a double-quoted body with bash rules: backslash is literal
+    except before  $  `  "  \\  or newline."""
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\' and i + 1 < n and s[i + 1] in '$`"\\\n':
+            out.append(s[i + 1]); i += 2
+        else:
+            out.append(c); i += 1
+    return ''.join(out)
+
+
 def _convert_node(node: Any) -> dict:
     """Recursively convert a bashlex AST node to internal format."""
     kind = node.kind
@@ -171,6 +187,16 @@ def _convert_node(node: Any) -> dict:
                     quoted = "single"
 
         word_val = node.word
+        # bashlex over-de-escapes double-quoted words, dropping backslashes
+        # even before ordinary chars (\n, \t): "%s\n" wrongly collapses to
+        # "%sn".  Inside double quotes bash keeps a backslash literal EXCEPT
+        # before a dollar, backtick, double-quote, backslash, or newline.
+        # Re-derive the word from the raw source slice with bash's real rule
+        # so escapes survive round-tripping.  We reuse the SAME raw_text used
+        # for quote detection; placeholder tokens inside carry no backslash
+        # and are restored afterwards by _restore_placeholders.
+        if quoted == "double" and raw_text.startswith('"') and raw_text.endswith('"'):
+            word_val = _bash_double_dequote(raw_text[1:-1])
         n = _word(word_val, pos=node.pos, parts=parts if parts else None)
         if quoted:
             n["quoted"] = quoted
@@ -677,7 +703,10 @@ def _detect_assignments(ast: dict) -> dict:
             for part in node.get("parts", []):
                 if part.get("type") == "word":
                     match = _ASSIGNMENT_RE.match(part.get("value", ""))
-                    if match and not part.get("parts"):
+                    # A quoted word (e.g. a printf format like "count=%d\n")
+                    # is a command argument, never an assignment split; only
+                    # bare unquoted name=value words may be promoted here.
+                    if match and not part.get("parts") and not part.get("quoted"):
                         assign = _assignment(
                             name=match.group(1),
                             value=match.group(2),

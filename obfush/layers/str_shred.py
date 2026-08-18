@@ -49,6 +49,10 @@ _DECLARATION_KEYWORDS = frozenset({
 
 def _should_shred(value: str, node: dict) -> bool:
     """Decide whether a string value should be shredded."""
+    # Array-literal assignment values must never be shredded: collapsing
+    # name=(a b c) into a "$(printf ...)" scalar makes ${#name[@]} == 1.
+    if node.get("array"):
+        return False
     if not value or value in LayerImpl.SKIP_PATTERNS:
         return False
     if _SHEBANG_RE.match(value):
