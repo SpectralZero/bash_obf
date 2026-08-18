@@ -348,13 +348,25 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             inner,
         )
 
-    def _mangle_string(s: str) -> str:
+    def _mangle_string(s: str, context: str = "code") -> str:
         """Replace identifiers only in expansion / arithmetic / assignment contexts.
 
         Multiline-safe: scans every line so it works correctly both for
         per-node word values AND for the opaque-blob fallback (whole script
         in a single word when bashlex can't parse it).
+
+        ``context`` reflects the word's quoting:
+          * ``"code"``   — unquoted / raw shell text: apply every pass.
+          * ``"double"`` — a double-quoted argument: only real expansions
+            ($var, ${...}, $((...)), $(...)) may rename; statement-level
+            patterns (command calls, assignment LHS, for/func headers) must
+            NOT fire — a quoted argument is data, not a command position.
+          * ``"single"`` — a single-quoted argument: fully literal, no
+            expansion of any kind; leave it untouched.
         """
+        if context == "single":
+            return s
+        stmt_level = context == "code"
         # 0a. Assignment LHS — handles  name=,  name+=,  name[i]=,
         #                    declare/local/export/readonly/typeset NAME=
         def _assign_repl(m: re.Match) -> str:
@@ -362,7 +374,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name in mangle_map:
                 return f"{boundary}{keyword}{mangle_map[name]}{op}"
             return m.group(0)
-        s = assign_lhs_pattern.sub(_assign_repl, s)
+        if stmt_level:
+            s = assign_lhs_pattern.sub(_assign_repl, s)
 
         # 0a'. Bare names in declaration statements (declare -A name, etc.)
         def _declare_bare_repl(m: re.Match) -> str:
@@ -370,7 +383,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name in mangle_map:
                 return f"{prefix}{mangle_map[name]}"
             return m.group(0)
-        s = _DECLARE_BARE_RE.sub(_declare_bare_repl, s)
+        if stmt_level:
+            s = _DECLARE_BARE_RE.sub(_declare_bare_repl, s)
 
         # 0a-unset. Rename variable names in unset/unsetenv commands.
         def _varname_cmd_repl(m: re.Match) -> str:
@@ -378,7 +392,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name in mangle_map:
                 return f"{prefix}{mangle_map[name]}"
             return m.group(0)
-        s = _VARNAME_CMD_RE.sub(_varname_cmd_repl, s)
+        if stmt_level:
+            s = _VARNAME_CMD_RE.sub(_varname_cmd_repl, s)
 
         # 0a''. Indirect reference values: ="ident", ='ident', =ident
         #       Renames the RHS when it is exactly a known identifier.
@@ -388,7 +403,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name and name in mangle_map:
                 return full.replace(name, mangle_map[name], 1)
             return full
-        s = _ASSIGN_INDIRECT_RE.sub(_indirect_repl, s)
+        if stmt_level:
+            s = _ASSIGN_INDIRECT_RE.sub(_indirect_repl, s)
 
         # 0b. for-loop iterator:  for NAME in ...   |   for (( NAME=... ))
         def _for_repl(m: re.Match) -> str:
@@ -405,7 +421,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                 # captured name in place rather than splicing the tail.
                 return full.replace(name, mangle_map[name], 1)
             return full
-        s = for_iter_pattern.sub(_for_repl, s)
+        if stmt_level:
+            s = for_iter_pattern.sub(_for_repl, s)
 
         # 0c. Function definition:  function NAME() {…}  |  NAME() {…}
         def _func_repl(m: re.Match) -> str:
@@ -415,10 +432,12 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                 # Replace only the name token; keep the sep and parens
                 return full.replace(name, mangle_map[name], 1)
             return m.group(0)
-        s = func_def_pattern.sub(_func_repl, s)
+        if stmt_level:
+            s = func_def_pattern.sub(_func_repl, s)
 
         # 0d. Function calls inside $(...): $(func_name ...)
-        #     The first word after $( is the command name.
+        #     The first word after $( is the command name.  This is a real
+        #     expansion and applies inside double quotes too.
         _cmd_sub_call = re.compile(
             r'\$\(\s*([a-zA-Z_]\w*)'
         )
@@ -439,7 +458,8 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if name in mangle_map:
                 return f"{boundary}{mangle_map[name]}"
             return m.group(0)
-        s = _CMD_CALL_RE.sub(_cmd_call_repl, s)
+        if stmt_level:
+            s = _CMD_CALL_RE.sub(_cmd_call_repl, s)
 
         # 1. Arithmetic expansion: rename bare identifiers within $((...))
         def _arith_repl(m: re.Match) -> str:
@@ -529,7 +549,9 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
         if node.get("type") == "word" and not node.get("literal") and not node.get("opaque"):
             value = node.get("value", "")
             if value:
-                node["value"] = _mangle_string(value)
+                # Quoting decides which renames are valid: a quoted argument is
+                # data, not a command position, so only real expansions rename.
+                node["value"] = _mangle_string(value, context=node.get("quoted") or "code")
             # Update var_refs annotation
             if "var_refs" in node:
                 node["var_refs"] = [

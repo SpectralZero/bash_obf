@@ -98,7 +98,18 @@ def _emit_word(node: dict, depth: int) -> str:
     # text (possibly mutated by id-mangle's regex). Wrapping it in quotes
     # would turn it into a literal string and break execution.
     if "raw" in node:
-        return node.get("value", node["raw"])
+        raw_value = node.get("value", node["raw"])
+        # A placeholder-restored complex expansion (${!ref}, ${v//a/b},
+        # $((...)), possibly with surrounding literal text) that was quoted in
+        # the source must STAY quoted, or it word-splits / glob-expands at
+        # runtime.  The 'quoted' attr is only set for genuinely quoted source
+        # words; opaque whole-script fallbacks and bare constructs have none.
+        q = node.get("quoted")
+        if q == "double":
+            return '"' + raw_value + '"'
+        if q == "single":
+            return "'" + raw_value + "'"
+        return raw_value
     value = node.get("value", "")
     if not value:
         return ""
