@@ -1,7 +1,6 @@
 """Tests for the procedural DecoyCorpus and output normalizer."""
 
 import random
-import pytest
 
 
 class TestDecoyCorpus:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import random
 import re
-from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
 
@@ -20,7 +19,6 @@ class LayerImpl(Layer):
 
     def transform(self, ast: dict, config: LayerConfig) -> tuple[dict, LayerStats]:
         stats = LayerStats()
-        rng = config.rng
         ast = _flow_walk(ast, config, stats)
         return ast, stats
 
@@ -31,6 +29,8 @@ class LayerImpl(Layer):
 # Declaration keywords whose arguments are scope-modifying variable bindings.
 # Wrapping these in a subshell (...) would lose the binding in the parent scope.
 _DECLARATION_KEYWORDS = frozenset({"local", "declare", "typeset", "readonly", "export"})
+_LARGE_BODY_THRESHOLD = 200
+_REORDER_WINDOW_SIZE = 50
 
 
 def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
@@ -42,17 +42,37 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     node_type = ast.get("type", "")
     stats.nodes_visited += 1
 
+    # Classify the ORIGINAL command's shell-state effects *before* any
+    # wrapping below reassigns `ast`.  Opaque-predicate wrapping turns a
+    # command into an `if` compound, after which a post-hoc
+    # `_mutates_shell_state(ast)` check would inspect the compound (and
+    # wrongly return False), allowing the command to be subshell-wrapped and
+    # its effect (e.g. `set -euo pipefail`, `shift`, `cd`) to be discarded.
+    orig_is_command = node_type == "command"
+    orig_mutates_state = orig_is_command and (
+        _has_variable_escape(ast) or _mutates_shell_state(ast)
+    )
+
     # ── Independent block reordering ──
     if node_type == "script":
         body = ast.get("body", [])
         if len(body) > 2 and rng.random() < config.intensity:
-            ast["body"] = _reorder_independent_blocks(body, rng)
+            max_group_size = (
+                _REORDER_WINDOW_SIZE if len(body) > _LARGE_BODY_THRESHOLD else None
+            )
+            ast["body"] = _reorder_independent_blocks(
+                body, rng, max_group_size=max_group_size,
+            )
+            if max_group_size is not None:
+                stats.custom["reorder_window_size"] = max_group_size
             stats.blocks_reordered += 1
             stats.nodes_modified += 1
 
     # ── Opaque predicate wrapping ──
     # Skip nodes marked _no_wrap (compound-condition children — wrapping
     # them produces invalid bash like  if if [[ ... ]]; then ... fi; then).
+    # Safe for state-mutating commands: `if <always-true>; then CMD; fi`
+    # still runs CMD in the current shell.
     if (node_type == "command"
             and not ast.get("_no_wrap")
             and rng.random() < config.intensity * 0.3):
@@ -60,10 +80,13 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
         stats.nodes_modified += 1
 
     # ── Subshell wrapping ──
-    if (node_type == "command"
+    # Never subshell-wrap a state-mutating command: a subshell runs it in a
+    # child process and silently discards the effect.  We use the pre-wrap
+    # classification so opaque-predicate wrapping above cannot hide it.
+    if (orig_is_command
             and not ast.get("_no_wrap")
             and rng.random() < config.intensity * 0.2
-            and not _has_variable_escape(ast)):
+            and not orig_mutates_state):
         ast = _wrap_subshell(ast)
         stats.nodes_modified += 1
 
@@ -104,6 +127,35 @@ _BARRIER_COMMANDS = frozenset({
     "set", "shopt", "ulimit", "umask",   # global state
     "cd", "pushd", "popd",               # CWD-dependent
 })
+
+# Additional builtins that mutate parent-shell state (options, positional
+# params, variables, traps).  Running any of these inside a subshell (...)
+# would discard the effect in the parent shell.
+_STATEFUL_BUILTINS = frozenset({
+    "unset", "read", "eval", "mapfile", "readarray", "getopts", "let", "wait",
+    "unalias", "alias", "disown", "hash", "enable",
+})
+
+
+def _mutates_shell_state(node: dict) -> bool:
+    """True if a command changes parent-shell state and so must never be
+    wrapped in a subshell or extracted into a called function.
+
+    Covers option/trap/positional/dir/scope builtins:  set, shopt, shift,
+    cd, trap, exec, export, readonly, declare, local, typeset, unset, read,
+    eval, source/., ulimit, umask, getopts, etc.
+    """
+    if not isinstance(node, dict) or node.get("type") != "command":
+        return False
+    parts = node.get("parts") or []
+    if not parts or not isinstance(parts[0], dict) or parts[0].get("type") != "word":
+        return False
+    cmd = parts[0].get("value", "")
+    return (
+        cmd in _BARRIER_COMMANDS
+        or cmd in _DECLARATION_KEYWORDS
+        or cmd in _STATEFUL_BUILTINS
+    )
 
 
 def _is_control_flow_barrier(node: dict) -> bool:
@@ -290,13 +342,17 @@ def _get_var_writes(node: dict) -> set[str]:
     return writes
 
 
-def _reorder_independent_blocks(body: list[dict], rng: random.Random) -> list[dict]:
-    """Reorder blocks that have no data dependencies on each other."""
+def _reorder_independent_blocks(
+    body: list[dict],
+    rng: random.Random,
+    max_group_size: int | None = None,
+) -> list[dict]:
+    """Reorder independent blocks using linear aggregate dependency tracking."""
     # Build dependency info for each block
     blocks = []
     for node in body:
-        reads = _get_var_refs(node) - _get_var_writes(node)
         writes = _get_var_writes(node)
+        reads = _get_var_refs(node) - writes
         is_barrier = _is_control_flow_barrier(node)
         blocks.append({
             "node": node, "reads": reads, "writes": writes,
@@ -306,57 +362,66 @@ def _reorder_independent_blocks(body: list[dict], rng: random.Random) -> list[di
     # Find groups of independent blocks (no shared variables, no barrier)
     result: list[dict] = []
     independent_group: list[dict] = []
+    group_reads: set[str] = set()
+    group_writes: set[str] = set()
+    group_has_barrier = False
 
-    for i, block in enumerate(blocks):
-        can_reorder = True
-        # Control-flow barriers (exit, return, break, continue, trap)
-        # MUST keep their original position relative to surrounding blocks.
-        if block["barrier"]:
-            can_reorder = False
-        for other in independent_group:
-            # Check if this block depends on any block in the group
-            if (block["reads"] & other["writes"]
-                    or block["writes"] & other["reads"]
-                    or block["writes"] & other["writes"]
-                    or other["barrier"]):
-                can_reorder = False
-                break
+    def flush_group() -> None:
+        nonlocal independent_group, group_reads, group_writes, group_has_barrier
+        if independent_group:
+            rng.shuffle(independent_group)
+            result.extend(block["node"] for block in independent_group)
+        independent_group = []
+        group_reads = set()
+        group_writes = set()
+        group_has_barrier = False
 
-        if can_reorder:
-            independent_group.append(block)
-        else:
-            # Flush the current group (shuffled)
-            if independent_group:
-                rng.shuffle(independent_group)
-                result.extend(b["node"] for b in independent_group)
-            independent_group = [block]
+    for block in blocks:
+        block_reads = block["reads"]
+        block_writes = block["writes"]
+        block_barrier = block["barrier"]
+        if not isinstance(block_reads, set) or not isinstance(block_writes, set):
+            continue
+        if not isinstance(block_barrier, bool):
+            block_barrier = bool(block_barrier)
+        reached_window = (
+            max_group_size is not None and len(independent_group) >= max_group_size
+        )
+        conflicts = (
+            block_barrier
+            or group_has_barrier
+            or bool(block_reads & group_writes)
+            or bool(block_writes & group_reads)
+            or bool(block_writes & group_writes)
+        )
+        if reached_window or conflicts:
+            flush_group()
+        independent_group.append(block)
+        group_reads.update(block_reads)
+        group_writes.update(block_writes)
+        group_has_barrier = group_has_barrier or block_barrier
 
-    # Flush remaining
-    if independent_group:
-        rng.shuffle(independent_group)
-        result.extend(b["node"] for b in independent_group)
+    flush_group()
 
     return result
 
 
 def _wrap_opaque_predicate(node: dict, rng: random.Random) -> dict:
-    """Wrap a command in an opaque predicate (always true)."""
-    predicates = [
-        '[[ $(( 0x7f ^ 0x7f )) -eq 0 ]]',
-        '[[ $(( 1 + 1 )) -eq 2 ]]',
-        '[[ $(( 0xFF & 0xFF )) -ne 0 ]]',
-        '[[ -z "" ]]',
-        '[[ $(( 42 % 42 )) -eq 0 ]]',
-        '[[ $(( 0xDEAD ^ 0xDEAD )) -eq 0 ]]',
-    ]
-    predicate = rng.choice(predicates)
+    """Wrap a command in a procedurally-generated opaque predicate (always true)."""
+    predicate = _generate_opaque_predicate(rng)
 
     # The test command is a condition of this synthetic if — mark it _no_wrap
     # so that recursion doesn't wrap it in yet another opaque predicate,
     # which would produce invalid bash:  if if [[ ... ]]; then ... fi; then
+    #
+    # The predicate is emitted VERBATIM (raw): some categories start with `!`
+    # or contain `[[ ... ]]`/arithmetic that the word emitter would otherwise
+    # wrap in double quotes, turning the test into a literal command name
+    # (`if "! [[ 12 -eq 0 ]]"; then` → "command not found").  Setting raw also
+    # keeps str-shred from fragmenting the predicate.
     test_cmd = {
         "type": "command",
-        "parts": [{"type": "word", "value": predicate, "pos": None}],
+        "parts": [{"type": "word", "value": predicate, "raw": predicate, "pos": None}],
         "pos": None,
         "_no_wrap": True,
     }
@@ -368,6 +433,71 @@ def _wrap_opaque_predicate(node: dict, rng: random.Random) -> dict:
         "pos": None,
         "_opaque": True,
     }
+
+
+def _generate_opaque_predicate(rng: random.Random) -> str:
+    """Generate a unique, analysis-resistant always-true predicate.
+
+    Five categories of predicates, each with randomized operands.
+    No two builds share the same predicate strings.
+    """
+    category = rng.randint(0, 4)
+
+    if category == 0:
+        # Randomized arithmetic identity — result is deterministic but
+        # operands are randomized so pattern matching fails.
+        a = rng.randint(2, 97)
+        b = rng.randint(2, 97)
+        c = a * b
+        # $(( a * b )) always equals c
+        return f'[[ $(( {a} * {b} )) -eq {c} ]]'
+
+    elif category == 1:
+        # String-based always-true predicate (valid bash, randomized).
+        # NOTE: the previous implementation emitted `${#{N:-word}}`, which is
+        # a bash "bad substitution" syntax error and broke any script whose
+        # opaque wrapper landed on this branch.  These variants are all valid
+        # bash and always true, while staying resistant to pattern matching.
+        word = rng.choice([
+            "/bin", "/usr", "/etc", "/tmp", "/dev", "/proc", "/sys",
+            "/var", "/opt", "/lib", "/home", "/root", "/sbin",
+        ])
+        variant = rng.randint(0, 2)
+        if variant == 0:
+            # Prefix glob: a word always matches one of its own prefixes + '*'.
+            prefix = word[:rng.randint(1, len(word))]
+            return f'[[ "{word}" == {prefix}* ]]'
+        if variant == 1:
+            # Suffix glob: a word always matches '*' + one of its own suffixes.
+            suffix = word[len(word) - rng.randint(1, len(word)):]
+            return f'[[ "{word}" == *{suffix} ]]'
+        # Byte-length check: printf writes exactly len(word) bytes.
+        return f"[[ \"$(printf '%s' '{word}' | wc -c)\" -eq {len(word)} ]]"
+
+    elif category == 2:
+        # Environment/system checks — always true on Linux
+        checks = [
+            '[[ -d /proc/self ]]',
+            '[[ -r /dev/null ]]',
+            '[[ -e /dev/zero ]]',
+            f'[[ $(( {rng.randint(1, 255)} & {rng.randint(1, 255)} | 1 )) -gt 0 ]]',
+            f'[[ -n "${{BASH:-/bin/bash}}" ]]',
+            f'[[ "${{BASH_VERSION:0:1}}" -gt 0 ]] 2>/dev/null || true && [[ 1 -eq 1 ]]',
+        ]
+        return rng.choice(checks)
+
+    elif category == 3:
+        # Negated false — less obvious than always-true
+        a = rng.randint(100, 9999)
+        b = rng.randint(1, 99)
+        return f'! [[ $(( {a} % {b} + 1 )) -eq 0 ]]'
+
+    else:
+        # Mixed-operator arithmetic — harder for symbolic solvers
+        x = rng.randint(1, 255)
+        y = rng.randint(1, 255)
+        result = (x | y) & 0xFF
+        return f'[[ $(( ({x} | {y}) & 255 )) -eq {result} ]]'
 
 
 def _has_variable_escape(node: dict) -> bool:
@@ -410,7 +540,8 @@ def _extract_functions(body: list[dict], rng: random.Random) -> list[dict]:
         i for i, node in enumerate(body)
         if (isinstance(node, dict)
             and node.get("type") == "command"
-            and not _has_variable_escape(node))
+            and not _has_variable_escape(node)
+            and not _mutates_shell_state(node))
     ]
 
     if not extractable:

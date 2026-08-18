@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>obfush workspace</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">O</span><strong>obfush</strong><span>workspace</span></div>
+    <div class="top-actions">
+      <span id="api-status" class="status-dot" aria-label="API status"></span>
+      <button id="copy-output" class="button quiet" type="button">Copy output</button>
+      <button id="download-output" class="button quiet" type="button">Download</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="controls" aria-label="Obfuscation controls">
+      <section class="control-section">
+        <div class="section-heading"><h2>Configuration</h2><button id="reset-config" class="text-button" type="button">Reset</button></div>
+        <label class="field-label" for="preset-control">Preset</label>
+        <div id="preset-control" class="segments preset-segments" role="group" aria-label="Preset"></div>
+      </section>
+
+      <section class="control-section">
+        <div class="section-heading"><h2>Layers</h2><button id="auto-layers" class="text-button" type="button">Automatic</button></div>
+        <div id="layer-list" class="layer-list"></div>
+      </section>
+
+      <section class="control-section compact-fields">
+        <label class="range-field" for="intensity">
+          <span>Intensity <output id="intensity-value">0.80</output></span>
+          <input id="intensity" type="range" min="0" max="1" value="0.8" step="0.05">
+        </label>
+        <label class="range-field" for="size-ratio">
+          <span>Maximum size <output id="size-ratio-value">3.0x</output></span>
+          <input id="size-ratio" type="range" min="1" max="10" value="3" step="0.5">
+        </label>
+        <label class="range-field" for="entropy-target">
+          <span>Entropy target <output id="entropy-target-value">4.5</output></span>
+          <input id="entropy-target" type="range" min="0" max="8" value="4.5" step="0.1">
+        </label>
+        <label class="field-label" for="eval-mode">Execution mode</label>
+        <select id="eval-mode">
+          <option value="ok">Eval permitted</option>
+          <option value="no-eval">No eval</option>
+          <option value="direct-exec">Direct exec</option>
+        </select>
+        <label class="field-label" for="seed">Seed</label>
+        <input id="seed" type="text" maxlength="256" placeholder="Random" autocomplete="off">
+      </section>
+    </aside>
+
+    <div class="work-area">
+      <section class="editor-grid" aria-label="Source workspace">
+        <div class="editor-pane">
+          <div class="editor-heading"><h1>Source</h1><span id="source-count">0 B</span></div>
+          <textarea id="source-editor" spellcheck="false" aria-label="Bash source">#!/usr/bin/env bash
+name="operator"
+printf 'hello %s\n' "$name"
+</textarea>
+        </div>
+        <div class="editor-pane output-pane">
+          <div class="editor-heading"><h1>Output</h1><span id="output-count">0 B</span></div>
+          <textarea id="output-editor" spellcheck="false" readonly aria-label="Obfuscated output" placeholder="Obfuscated Bash appears here"></textarea>
+        </div>
+      </section>
+
+      <div class="command-bar">
+        <div id="request-message" class="request-message" role="status" aria-live="polite">Ready</div>
+        <div class="command-actions">
+          <button id="analyze-action" class="button secondary" type="button">Analyze</button>
+          <button id="obfuscate-action" class="button primary" type="button">Obfuscate</button>
+        </div>
+      </div>
+
+      <section class="metrics-band" aria-label="Run metrics">
+        <div class="metric"><span>Security indicator</span><strong id="metric-score">--</strong></div>
+        <div class="metric"><span>Entropy</span><strong id="metric-entropy">--</strong></div>
+        <div class="metric"><span>Size ratio</span><strong id="metric-ratio">--</strong></div>
+        <div class="metric"><span>Layers</span><strong id="metric-layers">--</strong></div>
+        <div class="metric"><span>Elapsed</span><strong id="metric-elapsed">--</strong></div>
+      </section>
+
+      <section class="analysis-band" aria-label="Static analysis">
+        <div class="section-heading"><h2>Static analysis</h2><span id="analysis-hash" class="hash-value"></span></div>
+        <div id="analysis-findings" class="findings empty-state">Run analysis to inspect executable tokens, liveness candidates, fingerprints, and structure.</div>
+      </section>
+
+      <section class="batch-band" aria-label="Batch queue">
+        <div class="batch-heading">
+          <div><h2>Batch queue</h2><span id="batch-summary">No files queued</span></div>
+          <div class="batch-actions">
+            <label class="button quiet file-button" for="batch-input">Add .sh files</label>
+            <input id="batch-input" type="file" accept=".sh,text/x-shellscript" multiple hidden>
+            <button id="clear-batch" class="button quiet" type="button">Clear</button>
+            <button id="run-batch" class="button secondary" type="button" disabled>Run batch</button>
+          </div>
+        </div>
+        <div id="drop-zone" class="drop-zone">Drop Bash files here</div>
+        <div class="queue-table-wrap">
+          <table class="queue-table">
+            <thead><tr><th>File</th><th>Source</th><th>Status</th><th>Output</th><th></th></tr></thead>
+            <tbody id="batch-list"><tr><td colspan="5" class="empty-cell">Queue is empty</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>

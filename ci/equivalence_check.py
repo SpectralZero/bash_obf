@@ -36,8 +36,8 @@ from typing import NamedTuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from obfush.engine.core import EngineConfig, PolymorphicEngine
-from obfush.engine.normalize import normalize_output
+from obfush.engine.core import EngineConfig, PolymorphicEngine  # noqa: E402
+from obfush.engine.normalize import normalize_output  # noqa: E402
 
 
 # -- Quarantine ---------------------------------------------------------------
@@ -96,6 +96,7 @@ def check_fixture(
     intensity: float,
     eval_mode: str,
     bash_path: str,
+    timeout: int = 60,
 ) -> dict:
     """Obfuscate a fixture and compare behaviour to original.
     Returns a structured dict suitable for JSON serialization:
@@ -159,12 +160,12 @@ def check_fixture(
 
     try:
         # Run original
-        orig = run_script(bash_path, str(fixture_path))
+        orig = run_script(bash_path, str(fixture_path), timeout=timeout)
         result_meta["durations_ms"]["run_original"] = orig.duration_ms
         result_meta["exit_codes"]["original"] = orig.exit_code
 
         # Run obfuscated
-        obf = run_script(bash_path, obf_path)
+        obf = run_script(bash_path, obf_path, timeout=timeout)
         result_meta["durations_ms"]["run_obfuscated"] = obf.duration_ms
         result_meta["exit_codes"]["obfuscated"] = obf.exit_code
 
@@ -274,6 +275,7 @@ def main() -> int:
         is_quarantined = fixture.name in QUARANTINE
         result = check_fixture(
             fixture, args.seed, args.intensity, args.eval_mode, bash_path,
+            timeout=args.timeout,
         )
         result["quarantined"] = is_quarantined
         all_results.append(result)
@@ -314,7 +316,7 @@ def main() -> int:
                 print(f"       \\-- norm:  original={norm_orig}  obfuscated={norm_obf}")
 
             if is_quarantined:
-                print(f"       \\-- QUARANTINED: known failure, not blocking CI")
+                print("       \\-- QUARANTINED: known failure, not blocking CI")
 
     # Summary -- quarantined failures don't count as CI-breaking
     passed = sum(1 for r in all_results if r["equivalent"])
@@ -333,7 +335,7 @@ def main() -> int:
     print(" ===")
 
     if quar_failed:
-        print(f"\n  Quarantined (not blocking CI):")
+        print("\n  Quarantined (not blocking CI):")
         for r in quarantined_failures:
             reasons = []
             if not r["stdout_match"]:
@@ -343,7 +345,7 @@ def main() -> int:
             print(f"    ? {r['fixture']}: {', '.join(reasons)}")
 
     if hard_failed > 0:
-        print(f"\n  Failed fixtures:")
+        print("\n  Failed fixtures:")
         for r in all_results:
             if not r["equivalent"] and not r.get("quarantined"):
                 reasons = []

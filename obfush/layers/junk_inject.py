@@ -1,27 +1,21 @@
-"""
-Layer 4: Junk Injection (Dead Code)
-
-Injects believable but useless code that executes harmlessly.
-Never alters real variables or control flow. Appears as normal
-operational code to a human analyst.
-"""
+"""Layer 4: side-effect-contained live decoy injection."""
 
 from __future__ import annotations
 
 import random
-from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
+from obfush.utils.live_chain import LiveChainGenerator
 
 
 class LayerImpl(Layer):
     name = "junk-inject"
-    description = "Dead code & timing jitter"
+    description = "Live decoy dependency chains"
 
     def transform(self, ast: dict, config: LayerConfig) -> tuple[dict, LayerStats]:
         stats = LayerStats()
         rng = config.rng
-        catalogue = JunkCatalogue(rng, config.intensity)
+        catalogue = JunkCatalogue(rng, config.intensity, config.name_pool)
 
         ast = _inject_walk(ast, config, catalogue, stats, depth=0)
         return ast, stats
@@ -31,157 +25,37 @@ class LayerImpl(Layer):
 
 
 class JunkCatalogue:
-    """Generates diverse dead code blocks."""
+    """Generates atomic, side-effect-contained live decoy chains."""
 
-    def __init__(self, rng: random.Random, intensity: float) -> None:
+    def __init__(self, rng: random.Random, intensity: float, name_pool=None) -> None:
         self.rng = rng
         self.intensity = intensity
-        self._counter = 0
-
-    def _next_id(self) -> str:
-        """Generate a unique junk variable suffix."""
-        self._counter += 1
-        return f"0x{self.rng.randint(0x100, 0xffff):04x}"
+        self.name_pool = name_pool
+        self._chains = LiveChainGenerator(rng, name_pool, marker="_junk")
 
     def generate(self) -> dict:
         """Generate a random junk AST node."""
         generators = [
-            self._assigned_never_read,
-            self._noop_chain,
-            self._dead_conditional,
-            self._dead_function,
-            self._timing_jitter,
-            self._discarded_subshell,
+            self._chained_assignment,
+            self._operational_chain,
+            self._called_noop_function,
         ]
         gen = self.rng.choice(generators)
         return gen()
 
-    def _assigned_never_read(self) -> dict:
-        """Variable assigned but never read: _junk_0x3f1="$(whoami || id -un)" """
-        jid = self._next_id()
-        values = [
-            '"$(whoami 2>/dev/null || id -un 2>/dev/null)"',
-            '"$(date +%s 2>/dev/null)"',
-            '"$(hostname -s 2>/dev/null || echo localhost)"',
-            '"$(uname -r 2>/dev/null)"',
-            '"${RANDOM:-0}"',
-            '"/tmp/.cache_${$}"',
-            '"$(printf "%d" $((RANDOM % 256)))"',
-        ]
-        value = self.rng.choice(values)
-        return {
-            "type": "assignment",
-            "name": f"_jnk_{jid}",
-            "value": value,
-            "pos": None,
-            "_junk": True,
-        }
+    def _chained_assignment(self) -> dict:
+        return self._chains.generate()
 
-    def _noop_chain(self) -> dict:
-        """No-op chain: : "initialising..." && true && [[ 1 -eq 1 ]]"""
+    def _operational_chain(self) -> dict:
         messages = [
             "initialising...", "loading configuration", "checking dependencies",
             "validating input", "preparing environment", "sync complete",
             "cache warm", "module loaded", "ready", "standby",
         ]
-        msg = self.rng.choice(messages)
-        return {
-            "type": "command",
-            "parts": [
-                {"type": "word", "value": ":", "pos": None},
-                {"type": "word", "value": f'"{msg}"', "pos": None},
-            ],
-            "pos": None,
-            "_junk": True,
-        }
+        return self._chains.generate(self.rng.choice(messages))
 
-    def _dead_conditional(self) -> dict:
-        """Dead conditional that never fires."""
-        jid = self._next_id()
-        return {
-            "type": "compound",
-            "kind": "if",
-            "parts": [
-                # Condition: always false
-                {
-                    "type": "test_expr",
-                    "original_style": "[[",
-                    "test_parts": [
-                        {"type": "word", "value": "-n", "pos": None},
-                        {"type": "word", "value": f'"${{_phantom_{jid}:-}}"', "pos": None},
-                    ],
-                    "parts": [],
-                    "pos": None,
-                },
-                # Body: harmless
-                {
-                    "type": "command",
-                    "parts": [
-                        {"type": "word", "value": ":", "pos": None},
-                    ],
-                    "pos": None,
-                },
-            ],
-            "pos": None,
-            "_junk": True,
-        }
-
-    def _dead_function(self) -> dict:
-        """Dead function that is never called."""
-        jid = self._next_id()
-        bodies = [
-            [{"type": "command", "parts": [
-                {"type": "word", "value": ":", "pos": None},
-                {"type": "word", "value": '"unused function"', "pos": None},
-            ], "pos": None}],
-            [{"type": "command", "parts": [
-                {"type": "word", "value": "return", "pos": None},
-                {"type": "word", "value": "0", "pos": None},
-            ], "pos": None}],
-        ]
-        return {
-            "type": "function_def",
-            "name": f"_fn_{jid}",
-            "body": {
-                "type": "compound",
-                "kind": "{",
-                "parts": self.rng.choice(bodies),
-                "pos": None,
-            },
-            "pos": None,
-            "_junk": True,
-        }
-
-    def _timing_jitter(self) -> dict:
-        """Small timing jitter: sleep 0.N"""
-        delay = self.rng.randint(1, 3)
-        return {
-            "type": "command",
-            "parts": [
-                {"type": "word", "value": "sleep", "pos": None},
-                {"type": "word", "value": f"0.{delay}", "pos": None},
-            ],
-            "pos": None,
-            "_junk": True,
-        }
-
-    def _discarded_subshell(self) -> dict:
-        """Subshell that discards output: ( : "$(hostname)" ) """
-        cmds = ['"$(hostname 2>/dev/null)"', '"$(date 2>/dev/null)"', '"$(id 2>/dev/null)"']
-        return {
-            "type": "compound",
-            "kind": "(",
-            "parts": [{
-                "type": "command",
-                "parts": [
-                    {"type": "word", "value": ":", "pos": None},
-                    {"type": "word", "value": self.rng.choice(cmds), "pos": None},
-                ],
-                "pos": None,
-            }],
-            "pos": None,
-            "_junk": True,
-        }
+    def _called_noop_function(self) -> dict:
+        return self._chains.generate_function_chain()
 
 
 def _is_safe_injection_point(node: dict, parent: dict | None) -> bool:
@@ -239,6 +113,7 @@ def _inject_walk(
                         new_list.append(junk)
                         stats.junk_blocks_injected += 1
                         stats.nodes_modified += 1
+                        stats.nodes_modified += 1
 
                     new_list.append(
                         _inject_walk(item, config, catalogue, stats, depth + 1, ast)
@@ -270,6 +145,7 @@ def _inject_walk(
                             and depth < 3):
                         new_list.append(catalogue.generate())
                         stats.junk_blocks_injected += 1
+                        stats.nodes_modified += 1
                     new_list.append(
                         _inject_walk(item, config, catalogue, stats, depth + 1, ast)
                     )

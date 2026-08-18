@@ -1,6 +1,5 @@
 """Tests for the AST emitter — round-trip parse→emit."""
 
-import pytest
 from obfush.engine.ast_parser import parse_bash
 from obfush.engine.ast_emitter import emit
 
@@ -38,3 +37,8 @@ class TestEmitter:
             ast = parse_bash(source)
             output = emit(ast)
             assert output.strip(), f"Empty output for: {source}"
+
+    def test_sole_parameter_expansion_is_kept_as_one_word(self):
+        ast = parse_bash('printf "%s\\n" "$value"')
+        output = emit(ast)
+        assert '"$value"' in output

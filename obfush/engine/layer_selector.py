@@ -51,12 +51,14 @@ class LayerSelector:
 
         if self.disable_layers:
             validate_layer_set(self.disable_layers)
-            candidates = [l for l in candidates if l not in self.disable_layers]
+            candidates = [
+                layer for layer in candidates if layer not in self.disable_layers
+            ]
 
         if len(candidates) < self.min_layers:
             available = [
-                l for l in ALL_LAYER_NAMES
-                if l not in candidates and l not in self.disable_layers
+                layer for layer in ALL_LAYER_NAMES
+                if layer not in candidates and layer not in self.disable_layers
             ]
             self.rng.shuffle(available)
             while len(candidates) < self.min_layers and available:
@@ -78,10 +80,14 @@ class LayerSelector:
 
     def _auto_select(self) -> list[str]:
         """Auto-select layers based on intensity."""
-        always_on = ["id-mangle", "str-shred", "cmd-sub", "junk-inject"]
+        # Security-critical layers are always enabled
+        always_on = [
+            "id-mangle", "str-shred", "cmd-sub", "junk-inject",
+            "opaque-const", "encode",
+        ]
         optional = {
-            "flow-obfusc": 0.4, "encode": 0.3, "indirection": 0.5,
-            "poly-shell": 0.9, "entropy-mask": 0.6,
+            "flow-obfusc": 0.4, "cff": 0.5, "indirection": 0.5,
+            "poly-shell": 0.6, "entropy-mask": 0.6, "anti-trace": 0.5,
         }
         selected = list(always_on)
         for name, threshold in optional.items():

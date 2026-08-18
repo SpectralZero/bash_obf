@@ -13,7 +13,6 @@ Matrix values:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
 
 
 class Compat(Enum):
@@ -58,6 +57,20 @@ MATRIX: dict[str, dict[str, Compat]] = {
         "cmd-sub": Compat.DANGER, "junk-inject": Compat.OK,
         "encode": Compat.OK, "indirection": Compat.DANGER,
         "poly-shell": Compat.DANGER, "entropy-mask": Compat.OK,
+    },
+    "opaque-const": {
+        "id-mangle": Compat.OK, "str-shred": Compat.OK,
+        "cmd-sub": Compat.OK, "junk-inject": Compat.OK,
+        "flow-obfusc": Compat.OK, "encode": Compat.OK,
+        "indirection": Compat.OK, "poly-shell": Compat.OK,
+        "entropy-mask": Compat.OK,
+    },
+    "cff": {
+        "id-mangle": Compat.OK, "str-shred": Compat.OK,
+        "cmd-sub": Compat.OK, "junk-inject": Compat.OK,
+        "flow-obfusc": Compat.DANGER, "opaque-const": Compat.OK,
+        "encode": Compat.OK, "indirection": Compat.OK,
+        "poly-shell": Compat.OK, "entropy-mask": Compat.OK,
     },
     "encode": {
         "id-mangle": Compat.OK, "str-shred": Compat.OK,
@@ -107,6 +120,23 @@ ORDERING_RULES: list[tuple[str, str]] = [
     ("flow-obfusc", "encode"),
     ("flow-obfusc", "str-shred"),
     ("flow-obfusc", "cmd-sub"),
+    # Opaque constants operate on visible numeric syntax. Run after identifier
+    # and flow analysis but before text-hiding layers.
+    ("id-mangle", "opaque-const"),
+    ("flow-obfusc", "opaque-const"),
+    ("opaque-const", "encode"),
+    ("opaque-const", "str-shred"),
+    ("opaque-const", "entropy-mask"),
+    ("opaque-const", "poly-shell"),
+    ("id-mangle", "cff"),
+    ("flow-obfusc", "cff"),
+    ("opaque-const", "cff"),
+    ("cmd-sub", "cff"),
+    ("cff", "junk-inject"),
+    ("cff", "encode"),
+    ("cff", "str-shred"),
+    ("cff", "entropy-mask"),
+    ("cff", "poly-shell"),
     # entropy-mask injects raw bash decoy text that must pass through verbatim.
     # All AST-rewriting / string-mangling layers must run BEFORE it, otherwise
     # they corrupt the decoys (e.g. str-shred hex-escaping the decoy LHS).
@@ -122,6 +152,21 @@ ORDERING_RULES: list[tuple[str, str]] = [
     # output — otherwise their transformations are invisible to it.
     ("encode", "poly-shell"),
     ("indirection", "poly-shell"),
+    ("str-shred", "poly-shell"),
+    # anti-trace injects a preamble — must be the very last layer so
+    # the anti-debugging code appears at the top of the final output
+    # and isn't mangled by other layers.
+    ("entropy-mask", "anti-trace"),
+    ("poly-shell", "anti-trace"),
+    ("encode", "anti-trace"),
+    ("str-shred", "anti-trace"),
+    ("id-mangle", "anti-trace"),
+    ("indirection", "anti-trace"),
+    ("junk-inject", "anti-trace"),
+    ("flow-obfusc", "anti-trace"),
+    ("cff", "anti-trace"),
+    ("cmd-sub", "anti-trace"),
+    ("opaque-const", "anti-trace"),
 ]
 
 
@@ -160,8 +205,8 @@ def get_safe_order(layers: list[str]) -> list[str]:
     layer_set = set(layers)
 
     # Build adjacency list and in-degree count from applicable rules
-    adj: dict[str, list[str]] = {l: [] for l in layers}
-    in_degree: dict[str, int] = {l: 0 for l in layers}
+    adj: dict[str, list[str]] = {layer: [] for layer in layers}
+    in_degree: dict[str, int] = {layer: 0 for layer in layers}
 
     for before, after in ORDERING_RULES:
         if before in layer_set and after in layer_set:
@@ -171,7 +216,7 @@ def get_safe_order(layers: list[str]) -> list[str]:
     # Kahn's algorithm — use original index as tiebreaker for stable sort
     index_map = {name: i for i, name in enumerate(layers)}
     queue: list[str] = sorted(
-        [l for l in layers if in_degree[l] == 0],
+        [layer for layer in layers if in_degree[layer] == 0],
         key=lambda x: index_map[x],
     )
 
@@ -215,7 +260,9 @@ def validate_layer_set(layers: list[str]) -> list[str]:
     Raises:
         ValueError: If any layer name is unknown.
     """
-    known = set(MATRIX.keys())
+    from obfush.layers import ALL_LAYER_NAMES
+
+    known = set(ALL_LAYER_NAMES)
     unknown = set(layers) - known
     if unknown:
         raise ValueError(

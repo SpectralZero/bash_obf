@@ -9,7 +9,8 @@ Each function produces valid bash that evaluates to the original string.
 from __future__ import annotations
 
 import random
-from typing import Any
+
+from obfush.utils.name_pool import NamePool
 
 
 def to_hex_escape(s: str) -> str:
@@ -84,48 +85,6 @@ def to_fragmented_concat(s: str, rng: random.Random) -> str:
     return "".join(fragments)
 
 
-def to_variable_reconstruction(
-    s: str,
-    rng: random.Random,
-    prefix: str = "_v",
-) -> tuple[list[str], str]:
-    """Decompose string into per-character variables and reassemble.
-
-    Example: "cur" →
-        _v0="c" _v1="u" _v2="r"
-        assembly: "${_v0}${_v1}${_v2}"
-
-    Args:
-        s:      Input string.
-        rng:    Seeded PRNG.
-        prefix: Variable name prefix.
-
-    Returns:
-        Tuple of (list of assignment statements, assembly expression).
-    """
-    # Generate unique suffixes
-    suffix_pool = list(range(1000))
-    rng.shuffle(suffix_pool)
-
-    assignments: list[str] = []
-    refs: list[str] = []
-
-    for i, char in enumerate(s):
-        var_name = f"{prefix}{suffix_pool[i]:03x}"
-        # Escape for assignment
-        if char == "'":
-            assignments.append(f'{var_name}="' + "'" + '"')
-        elif char == '"':
-            assignments.append(f"{var_name}='\"'")
-        elif char == "\\":
-            assignments.append(f'{var_name}="\\\\"')
-        else:
-            assignments.append(f'{var_name}="{char}"')
-        refs.append(f"${{{var_name}}}")
-
-    return assignments, "".join(refs)
-
-
 def to_arithmetic_printf(s: str) -> str:
     """Convert string to printf with arithmetic ASCII code expansion.
 
@@ -141,13 +100,13 @@ def to_arithmetic_printf(s: str) -> str:
         Bash printf command string.
     """
     codes = " ".join(f"$(( 0x{ord(c):02x} ))" for c in s)
-    return f"$(printf '%s' $(printf '\\\\x%02x' {codes}))"
+    return f'"$(printf \'%s\' $(printf \'\\\\x%02x\' {codes}))"'
 
 
 def to_arithmetic_printf_simple(s: str) -> str:
     """Simpler arithmetic printf — one printf with escape codes.
 
-    Example: "Hi" → $(printf '\\x48\\x69')
+    Example: "Hi" → "$(printf '\\x48\\x69')"
 
     Args:
         s: Input string.
@@ -156,13 +115,13 @@ def to_arithmetic_printf_simple(s: str) -> str:
         Bash command substitution string.
     """
     hex_codes = "".join(f"\\x{ord(c):02x}" for c in s)
-    return f"$(printf '{hex_codes}')"
+    return f'"$(printf \'{hex_codes}\')"'
 
 
 def to_base64_decode(s: str) -> str:
     """Convert string to base64-encoded inline decode.
 
-    Example: "Hello" → $(echo 'SGVsbG8=' | base64 -d)
+    Example: "Hello" → "$(printf '%s' 'SGVsbG8=' | base64 -d)"
 
     WARNING: Only use when eval_mode == 'ok'. This is flagged by
     shell audit tools.
@@ -175,14 +134,94 @@ def to_base64_decode(s: str) -> str:
     """
     import base64
     encoded = base64.b64encode(s.encode("utf-8")).decode("ascii")
-    return f"$(echo '{encoded}' | base64 -d)"
+    return f'"$(printf \'%s\' \'{encoded}\' | base64 -d)"'
+
+
+def to_split_variable_reconstruction(
+    s: str,
+    rng: random.Random,
+    name_pool: NamePool,
+) -> str:
+    """Reconstruct UTF-8 bytes from shuffled, subshell-local variables.
+
+    The assignments execute inside command substitution, so generated names
+    never enter the caller's variable scope. The final expansion remains
+    quoted and therefore occupies exactly one Bash argument.
+    """
+    data = s.encode("utf-8")
+    if not data:
+        return '""'
+    if s.endswith("\n"):
+        raise ValueError("split-variable reconstruction cannot preserve trailing newlines")
+
+    fragments: list[tuple[str, bytes]] = []
+    offset = 0
+    while offset < len(data):
+        width = rng.randint(1, min(4, len(data) - offset))
+        fragments.append((name_pool.next_name(), data[offset:offset + width]))
+        offset += width
+
+    assignments = list(fragments)
+    rng.shuffle(assignments)
+    setup = "; ".join(
+        f"{name}=$'{_hex_bytes(fragment)}'"
+        for name, fragment in assignments
+    )
+    reconstruction = "".join(f"${{{name}}}" for name, _ in fragments)
+    return f'"$({setup}; printf \'%s\' \"{reconstruction}\")"'
+
+
+def _hex_bytes(data: bytes) -> str:
+    return "".join("\\x%02x" % byte for byte in data)
+
+
+def to_xor_reconstruction(
+    s: str,
+    rng: random.Random,
+    name_pool: NamePool,
+) -> str:
+    """XOR-encrypt UTF-8 bytes and decrypt them with Bash builtins.
+
+    The key is assembled from three independently embedded byte values. All
+    runtime state lives inside command substitution and cannot enter the
+    caller's scope.
+    """
+    data = s.encode("utf-8")
+    if not data:
+        return '""'
+    if b"\0" in data:
+        raise ValueError("Bash strings cannot preserve NUL bytes")
+    if s.endswith("\n"):
+        raise ValueError("XOR reconstruction cannot preserve trailing newlines")
+
+    key = rng.randint(1, 255)
+    first_part = rng.randint(0, 255)
+    second_part = rng.randint(0, 255)
+    third_part = first_part ^ second_part ^ key
+    part_names = [name_pool.next_name() for _ in range(3)]
+    key_name = name_pool.next_name()
+    byte_name = name_pool.next_name()
+    octal_name = name_pool.next_name()
+    encrypted = " ".join(f"0x{byte ^ key:02x}" for byte in data)
+
+    assignments = list(zip(part_names, (first_part, second_part, third_part)))
+    rng.shuffle(assignments)
+    setup = "; ".join(f"{name}={value}" for name, value in assignments)
+    key_expression = " ^ ".join(part_names)
+    return (
+        f'"$({setup}; {key_name}=$(({key_expression})); '
+        f'for {byte_name} in {encrypted}; do '
+        f'printf -v {octal_name} \'%03o\' "$(({byte_name} ^ {key_name}))"; '
+        f'printf \'%b\' "\\\\${{{octal_name}}}"; done)"'
+    )
 
 
 def random_shred(
     s: str,
     rng: random.Random,
     eval_mode: str = "ok",
-) -> str | tuple[list[str], str]:
+    name_pool: NamePool | None = None,
+) -> str:
     """Apply a randomly-chosen shredding technique to a string.
 
     Args:
@@ -191,17 +230,15 @@ def random_shred(
         eval_mode: Controls whether base64 decode is available.
 
     Returns:
-        Either a single bash expression (str) or a tuple of
-        (setup_statements, expression) when variable reconstruction is used.
+        A single Bash expression.
     """
     methods = ["hex", "octal", "fragment", "arithmetic"]
     if eval_mode == "ok":
         methods.append("base64")
-
-    # Variable reconstruction is disabled: its setup assignments would need
-    # to be inserted before the use site, but the str-shred layer currently
-    # only annotates them on the node without hoisting them to the script
-    # body. Re-enable once the hoister is implemented.
+    if name_pool is not None and not s.endswith("\n"):
+        methods.append("split-variable")
+        if "\0" not in s:
+            methods.append("xor")
 
     method = rng.choice(methods)
 
@@ -215,7 +252,11 @@ def random_shred(
         return to_arithmetic_printf_simple(s)
     elif method == "base64":
         return to_base64_decode(s)
-    elif method == "variable":
-        return to_variable_reconstruction(s, rng)
+    elif method == "split-variable":
+        assert name_pool is not None
+        return to_split_variable_reconstruction(s, rng, name_pool)
+    elif method == "xor":
+        assert name_pool is not None
+        return to_xor_reconstruction(s, rng, name_pool)
     else:
         return to_hex_escape(s)  # fallback

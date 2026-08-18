@@ -24,6 +24,12 @@ from __future__ import annotations
 import re
 
 
+# Command separators after which an unquoted '#' begins a comment (in addition
+# to whitespace and start-of-line). A '#' that follows ordinary word characters
+# or '$' is literal shell data (e.g. $#, foo#bar), never a comment.
+_COMMENT_START_BOUNDARY = frozenset(";&|")
+
+
 def strip_comments(source: str) -> str:
     """Remove all comments from bash source, preserving shebangs and
     ``#`` inside strings, here-docs, and parameter expansions.
@@ -146,16 +152,22 @@ def _strip_line_comment(
             i += 1
             continue
 
-        # # outside any quotes — this is a comment start
+        # '#' outside any quotes MAY start a comment.
         if c == '#' and not sq and not dq:
-            # BUT: ${#var}, ${var#pat}, ${var##pat} are NOT comments
-            # Check if preceded by ${ or inside ${...}
+            # ${#var}, ${var#pat}, ${var##pat} are parameter expansion, not comments.
             prefix = line[:i]
             if _is_param_expansion_hash(prefix):
                 i += 1
                 continue
-            # It's a real comment — strip from here
-            return line[:i].rstrip()
+            # A '#' only begins a comment at the START OF A WORD: at the start of
+            # the line, or immediately after unquoted whitespace or a command
+            # separator (; & |).  A '#' anywhere else is literal shell data that
+            # belongs to the current word — e.g. the $# special parameter
+            # (argument count) or a word such as foo#bar — and must be preserved.
+            if i == 0 or line[i - 1].isspace() or line[i - 1] in _COMMENT_START_BOUNDARY:
+                return line[:i].rstrip()
+            i += 1
+            continue
 
         i += 1
 

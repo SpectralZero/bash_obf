@@ -129,12 +129,11 @@ def estimate_decoy_needed(
     #              / (target - decoy_entropy)
 
     denominator = target_entropy - decoy_entropy
-    if denominator >= 0:
+    if denominator <= 0:
         # Can't dilute — decoy has same or higher entropy than target
-        # This shouldn't happen with realistic values
         return current_size * 5  # generous fallback
 
-    decoy_size = current_size * (current_entropy - target_entropy) / abs(denominator)
+    decoy_size = current_size * (current_entropy - target_entropy) / denominator
     return max(0, int(decoy_size * 1.2))  # 20% margin
 
 
@@ -165,11 +164,11 @@ def format_entropy_report(
     in_target = entropy_in_range(overall, target)
 
     lines = [
-        f"═══ Entropy Analysis ═══",
+        "═══ Entropy Analysis ═══",
         f"Overall:     {overall:.3f} bits/byte",
         f"Target:      {target:.3f} ± 0.5",
         f"Status:      {'✓ IN RANGE' if in_target else '✗ OUT OF RANGE'}",
-        f"",
+        "",
         f"Window analysis ({window_size} byte windows):",
         f"  Min:       {min_entropy:.3f}",
         f"  Max:       {max_entropy:.3f}",
@@ -179,8 +178,8 @@ def format_entropy_report(
     ]
 
     if high_regions:
-        lines.append(f"")
-        lines.append(f"High-entropy regions:")
+        lines.append("")
+        lines.append("High-entropy regions:")
         for offset, ent in high_regions[:10]:
             lines.append(f"  offset {offset:6d}: {ent:.3f} bits/byte")
         if len(high_regions) > 10:

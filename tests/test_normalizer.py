@@ -1,6 +1,5 @@
 """Tests for the AST normaliser."""
 
-import pytest
 from obfush.engine.ast_parser import parse_bash
 from obfush.engine.normalizer import normalize
 

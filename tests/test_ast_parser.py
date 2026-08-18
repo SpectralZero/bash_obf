@@ -1,6 +1,5 @@
 """Tests for the AST parser."""
 
-import pytest
 from obfush.engine.ast_parser import parse_bash
 
 
@@ -70,7 +69,6 @@ class TestAssignmentDetection:
 
     def test_simple_assignment(self):
         ast = parse_bash('myvar="hello"')
-        body = ast["body"]
         # Should find an assignment node somewhere in the tree
         found = _find_nodes(ast, "assignment")
         assert len(found) >= 1

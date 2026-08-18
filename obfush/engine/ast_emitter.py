@@ -54,9 +54,42 @@ def _emit_script(node: dict, depth: int) -> str:
 
 def _emit_command(node: dict, depth: int) -> str:
     parts = node.get("parts", [])
-    words = [_emit_node(p, depth) for p in parts]
+    words: list[str] = []
+    # Heredoc bodies must be deferred until AFTER the whole command line
+    # (command + args + every other redirect).  Emitting the body inline at
+    # the `<<EOF` position pushes trailing redirects like `> file` onto the
+    # delimiter line, producing broken constructs such as `EOF > file`.
+    heredoc_tails: list[str] = []
+    for p in parts:
+        if (isinstance(p, dict) and p.get("type") == "redirect"
+                and p.get("heredoc")):
+            marker, tail = _split_heredoc_redirect(p, depth)
+            words.append(marker)
+            heredoc_tails.append(tail)
+            continue
+        emitted = _emit_node(p, depth)
+        if emitted:
+            words.append(emitted)
     result = " ".join(w for w in words if w)
+    for tail in heredoc_tails:
+        result += "\n" + tail
     return result
+
+
+def _split_heredoc_redirect(node: dict, depth: int) -> tuple[str, str]:
+    """Split a heredoc redirect into (inline marker, deferred body+delimiter).
+
+    The body stored on the node never includes the closing delimiter
+    (the parser strips it), so the delimiter is added exactly once here.
+    """
+    fd = node.get("fd")
+    heredoc = node.get("heredoc") or {}
+    delim = heredoc.get("delimiter", "EOF")
+    body = heredoc.get("body", "")
+    fd_str = f"{fd}" if fd is not None else ""
+    marker = f"{fd_str}<<{delim}"
+    tail = f"{body}\n{delim}" if body else delim
+    return marker, tail
 
 
 def _emit_word(node: dict, depth: int) -> str:
@@ -69,6 +102,13 @@ def _emit_word(node: dict, depth: int) -> str:
     value = node.get("value", "")
     if not value:
         return ""
+    # If the parser recorded the original quoting style, respect it.
+    quoted = node.get("quoted")
+    if quoted == "double":
+        # Re-wrap in double-quotes — preserves expansions, prevents splitting.
+        return '"' + value + '"'
+    elif quoted == "single":
+        return "'" + value + "'"
     return _shell_quote(value)
 
 
@@ -104,6 +144,14 @@ def _shell_quote(value: str) -> str:
     # the original quotes so we have to re-add a safe default).
     if value.startswith("${") and value.endswith("}") and "}" not in value[2:-1]:
         return f'"{value}"'
+    if re.fullmatch(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+|[?#*!$@-])", value):
+        return f'"{value}"'
+    # Command substitution: $(...)  or  `...`
+    # Whether to quote depends on context (argument vs command position).
+    # The parser sets a 'quoted' attribute when it detects the original source
+    # had double-quotes; _emit_word checks that BEFORE calling _shell_quote.
+    # Here in _shell_quote (no context), leave command-subs unquoted — the
+    # _emit_word caller handles quoting from the node's 'quoted' attribute.
     if (value.startswith("$(") and value.endswith(")")) or \
        (value.startswith("`") and value.endswith("`")):
         return value
@@ -258,6 +306,13 @@ def _emit_assignment(node: dict, depth: int) -> str:
     #     $(...), $((...)), `...`, <(...), >(...) — these self-delimit
     #   - Anything else with whitespace, glob chars, or non-ASCII: wrap in "..."
     if value and isinstance(value, str):
+        # Genuine array-literal RHS:  name=(elem ...) — tagged by the parser
+        # (``array``).  Emit verbatim; quoting would collapse the array into a
+        # single scalar string.  We deliberately gate on the parser flag and
+        # NOT the value shape, so a scalar whose value merely looks like an
+        # array — e.g.  x="(literal text)"  — is still correctly re-quoted.
+        if node.get("array"):
+            return f"{name}={value}"
         already_quoted = (
             value.startswith(('"', "'"))
             or value.startswith("$'") or value.startswith('$"')
@@ -298,15 +353,58 @@ def _strip_balanced(s: str) -> str:
 
 def _emit_list(node: dict, depth: int) -> str:
     parts = node.get("parts", [])
-    result_parts: list[str] = []
+    rendered: list[tuple[str, str]] = []
+    has_heredoc = False
     for part in parts:
-        if part.get("type") == "operator":
-            result_parts.append(part.get("op", ";"))
+        if isinstance(part, dict) and part.get("type") == "operator":
+            rendered.append(("op", part.get("op", ";")))
         else:
-            result_parts.append(_emit_node(part, depth))
+            emitted = _emit_node(part, depth)
+            rendered.append(("cmd", emitted))
+            if _ends_with_heredoc(emitted):
+                has_heredoc = True
 
-    # Join with spaces (operators already included)
-    return " ".join(result_parts)
+    if not has_heredoc:
+        # Historical behavior — preserved exactly so output size (and the
+        # engine's size-budget decisions) are unchanged for the common case.
+        return " ".join(tok for _, tok in rendered)
+
+    # Heredoc-aware join: a heredoc's closing delimiter must stand alone on
+    # its own line — never trail it with a space, ';', or an inline operator,
+    # or bash reads to EOF looking for the delimiter.
+    out = ""
+    prev_heredoc = False
+    for kind, tok in rendered:
+        if kind == "op":
+            if prev_heredoc:
+                out += "\n" if tok in ("\n", ";", "&") else "\n" + tok + " "
+            elif tok == "\n":
+                out += "\n"
+            elif tok in (";", "&"):
+                out += tok + " "
+            else:  # && || |
+                out += " " + tok + " "
+            prev_heredoc = False
+        else:
+            if not tok:
+                continue
+            if out and not out.endswith(("\n", " ")):
+                out += "\n" if prev_heredoc else " "
+            out += tok
+            prev_heredoc = _ends_with_heredoc(tok)
+    return out
+
+
+def _ends_with_heredoc(text: str) -> bool:
+    """True if ``text`` ends with a heredoc whose closing delimiter is the
+    final line (so a following token must start on a new line)."""
+    stripped = text.rstrip("\n")
+    if "\n" not in stripped:
+        return False
+    last_line = stripped.rsplit("\n", 1)[1]
+    if not re.fullmatch(r"[A-Za-z_]\w*", last_line):
+        return False
+    return re.search(r"<<-?\s*['\"]?" + re.escape(last_line) + r"(?!\w)", text) is not None
 
 
 def _emit_pipeline(node: dict, depth: int) -> str:
@@ -319,11 +417,15 @@ def _emit_compound(node: dict, depth: int) -> str:
     kind = node.get("kind", "group")
     parts = node.get("parts", [])
     inner = "\n".join(_emit_node(p, depth + 1) for p in parts)
+    # Redirects attached to the whole compound (e.g. `{ ...; } > file`,
+    # `( ...; ) 2>&1`, `for ...; done > log`).  bashlex stores these on the
+    # compound node; dropping them silently sends output to the wrong place.
+    redir = _emit_trailing_redirects(node, depth)
 
     if kind == "group" or kind == "{":
-        return "{\n" + inner + "\n}"
+        return "{\n" + inner + "\n}" + redir
     elif kind == "(":
-        return "(\n" + inner + "\n)"
+        return "(\n" + inner + "\n)" + redir
     elif kind in ("if", "while", "until", "for", "case", "select"):
         # Two possible AST shapes for control-flow compound nodes:
         #   A) Synthetic (entropy-mask, etc.): parts = [test, body, ...]
@@ -332,23 +434,34 @@ def _emit_compound(node: dict, depth: int) -> str:
         #      body, RW('fi')] — reservedwords are explicit children.
         # Detect by checking if the first part is a reservedword keyword.
         if _has_explicit_keywords(parts, kind):
-            return _emit_bashlex_control_flow(parts, depth)
+            return _emit_bashlex_control_flow(parts, depth) + redir
         # Synthetic — dispatch to the kind-specific emitter
         if kind == "if":
-            return _emit_if_compound(node, depth)
+            return _emit_if_compound(node, depth) + redir
         elif kind == "for":
-            return _emit_for_compound(node, depth)
+            return _emit_for_compound(node, depth) + redir
         elif kind == "while":
-            return _emit_while_compound(node, depth)
+            return _emit_while_compound(node, depth) + redir
         elif kind == "until":
-            return _emit_until_compound(node, depth)
+            return _emit_until_compound(node, depth) + redir
         elif kind == "case":
-            return _emit_case_compound(node, depth)
-        return inner
+            return _emit_case_compound(node, depth) + redir
+        return inner + redir
     elif kind == "[[":
-        return "[[ " + inner + " ]]"
+        return "[[ " + inner + " ]]" + redir
     else:
-        return inner
+        return inner + redir
+
+
+def _emit_trailing_redirects(node: dict, depth: int) -> str:
+    """Emit redirects attached to a compound node, as a leading-space suffix."""
+    redirects = node.get("redirects") or []
+    rendered = [
+        _emit_node(r, depth) for r in redirects
+        if isinstance(r, dict)
+    ]
+    rendered = [r for r in rendered if r]
+    return (" " + " ".join(rendered)) if rendered else ""
 
 
 _CONTROL_KEYWORDS = frozenset({

@@ -43,7 +43,15 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest tests/ -v --tb=short
+          pytest tests/ --cov=obfush --cov-report=term-missing --cov-fail-under=97
+
+      - name: Run Ruff
+        run: |
+          ruff check obfush tests ci
+
+      - name: Run anti-regression checks
+        run: |
+          pytest tests/test_anti_re.py -q
 
   # ─────────────────────────────────────────────────────────────────
   # Native fixture assertions — run all fixtures in bash, 0 failures

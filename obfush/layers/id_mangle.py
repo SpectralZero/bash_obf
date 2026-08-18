@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import random
 import re
-import string
-from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
 from obfush.utils.bash_keywords import (
@@ -33,7 +31,13 @@ class LayerImpl(Layer):
 
         # Step 2: Build the mangling map
         pool = _select_pool(rng, config.intensity)
-        mangle_map = _build_mangle_map(identifiers, rng, pool)
+        if config.name_pool is not None:
+            mangle_map = {
+                name: config.name_pool.next_name()
+                for name in sorted(identifiers)
+            }
+        else:
+            mangle_map = _build_mangle_map(identifiers, rng, pool)
         stats.identifiers_mangled = len(mangle_map)
 
         # Step 3: Apply the map to the AST
@@ -215,8 +219,8 @@ def _collect_identifiers(ast: dict) -> set[str]:
             if _is_mangleable(ref):
                 referenced.add(ref)
 
-        # Recurse
-        for key in ("parts", "body", "test_parts"):
+        # Recurse into all child containers
+        for key in ("parts", "body", "test_parts", "redirects", "heredoc"):
             val = node.get(key)
             if isinstance(val, list):
                 for item in val:
@@ -224,6 +228,9 @@ def _collect_identifiers(ast: dict) -> set[str]:
                         _walk(item)
             elif isinstance(val, dict):
                 _walk(val)
+        # Redirect target is a separate field (not in parts/body)
+        if isinstance(node.get("target"), dict):
+            _walk(node["target"])
 
     _walk(ast)
     return defined
@@ -537,13 +544,16 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             if "var_name" in node and node["var_name"] in mangle_map:
                 node["var_name"] = mangle_map[node["var_name"]]
 
-        # Recurse into children
-        for key in ("parts", "body", "test_parts"):
+        # Recurse into all child containers
+        for key in ("parts", "body", "test_parts", "redirects", "heredoc"):
             val = node.get(key)
             if isinstance(val, list):
                 node[key] = [_walk(i) if isinstance(i, dict) else i for i in val]
             elif isinstance(val, dict):
                 node[key] = _walk(val)
+        # Redirect target is a separate field
+        if isinstance(node.get("target"), dict):
+            node["target"] = _walk(node["target"])
 
         return node
 

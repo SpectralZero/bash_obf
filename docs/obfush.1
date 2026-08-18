@@ -1,0 +1,121 @@
+.TH OBFUSH 1 "obfush" "2.0.0-dev" "Internal tooling"
+.SH NAME
+obfush \- transform Bash source into an obfuscated Bash script
+.SH SYNOPSIS
+.B obfush
+.SH DESCRIPTION
+This page is generated from the Click command's plain \fB--help\fR output.
+It documents the command surface available in this source tree.
+.SH OPTIONS
+.nf
+Usage: obfush [OPTIONS] [INPUT_SCRIPT] [OUTPUT_SCRIPT]
+
+  obfush \-\- Polymorphic Bash Obfuscation Engine v2.0
+
+  Transforms INPUT_SCRIPT into an obfuscated OUTPUT_SCRIPT. Every invocation
+  produces unique output (use \-\-seed for reproducibility).
+
+  Pre\-processing strips all source comments deterministically (shebangs
+  preserved). The 11\-layer pipeline then runs in a compatibility\-DAG order;
+  entropy\-mask runs last and never appends decoys after the script's tail
+  statement (preserves exit codes).
+
+  Layers (DAG\-ordered, \-\-layers selects which to enable):
+    id\-mangle      Renames DEFINED vars & functions. Skips free
+                   references, builtins, env\-style ALL_CAPS, and
+                   PATH\-affecting commands.
+    str\-shred      Hex/octal/fragment/arithmetic\-printf/base64
+                   encoding of literal strings. Skips values
+                   containing $\-expansions or shell syntax.
+    cmd\-sub        echo<\->printf, true<\->:, source<\->., test\-style
+                   morphing.
+    junk\-inject    Side\-effect\-contained live dependency chains.
+    flow\-obfusc    Independent\-block reordering (data\-flow aware,
+                   stdout\-ordering aware), opaque predicates,
+                   subshell wrapping (skips local/declare/export
+                   so scope\-binding commands stay in parent shell).
+    opaque\-const   Equivalent arithmetic for safe integer contexts.
+    cff            Conservative straight\-line state dispatch.
+    encode         Wraps commands in eval/bash\-c reconstruction chains.
+                   Three modes: ok, no\-eval, direct\-exec.
+    indirection    Variable & associative\-array command dispatch.
+    poly\-shell     Multi\-process self\-extracting loader
+                   (only at intensity >= 0.9).
+    entropy\-mask   Procedural decoy injection (31,680\-combo corpus).
+                   Runs LAST. Tail statement is sacred \-\- decoys
+                   never appear after it.
+
+  Quick examples:
+    obfush \-\-seed 1337 in.sh out.sh           # Reproducible
+    obfush \-\-batch scripts/ build/ \-\-workers 4 # Recursive batch
+    obfush \-\-config .obfushrc in.sh out.sh    # YAML configuration
+    obfush \-v in.sh out.sh                    # Verbose stats
+    obfush \-\-eval\-mode no\-eval in.sh out.sh   # Zero eval tokens
+    obfush \-\-no\-layer poly\-shell in.sh out.sh # Skip a layer
+    obfush \-\-layers id\-mangle,encode \-\-min\-layers 2 in.sh out.sh
+    obfush \-\-help\-advanced                    # Full doc panel
+
+Options:
+  \-\-gui                           Launch the local web dashboard.
+  \-\-gui\-host TEXT                 GUI bind host.  [default: 127.0.0.1]
+  \-\-gui\-port INTEGER RANGE        [default: 5000; 1<=x<=65535]
+  \-\-no\-browser                    Do not open the GUI in a browser.
+  \-\-setup                         Create the global ~/.obfushrc file.
+  \-\-plugin FILE                   Load a trusted local layer plugin
+                                  (repeatable).
+  \-\-batch DIRECTORY               Process all .sh files under a directory.
+  \-\-workers INTEGER RANGE         Worker processes used by batch mode.
+                                  [default: 1; x>=1]
+  \-\-fail\-fast                     Stop batch processing after the earliest
+                                  failing input.
+  \-\-config FILE                   Use an explicit YAML configuration file.
+  \-\-no\-config                     Disable global and project .obfushrc
+                                  discovery.
+  \-\-log\-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]
+                                  Write structured JSON logs to stderr.
+                                  [default: WARNING]
+  \-\-benchmark                     Benchmark INPUT_SCRIPT without writing an
+                                  output file.
+  \-\-benchmark\-iterations INTEGER RANGE
+                                  Measured iterations used by \-\-benchmark.
+                                  [default: 5; x>=1]
+  \-\-seed TEXT                     Deterministic seed (reproducible output).
+  \-\-preset [stealth|standard|paranoid|godmode]
+                                  Configuration profile; explicit options take
+                                  precedence.
+  \-\-intensity FLOAT               0.0\-1.0 obfuscation aggressiveness (default:
+                                  0.8).
+  \-\-layers TEXT                   Comma\-separated layers to force (overrides
+                                  auto\-select).
+  \-\-no\-layer TEXT                 Comma\-separated layers to disable.
+  \-\-min\-layers INTEGER            Minimum active layers (default: 4).
+  \-\-eval\-mode [ok|no\-eval|direct\-exec]
+                                  How to handle code evaluation (default: ok).
+  \-\-entropy\-target FLOAT RANGE    Target Shannon entropy (bit/byte). Default:
+                                  4.5.  [0.0<=x<=8.0]
+  \-\-max\-size\-ratio FLOAT RANGE    Maximum output/input byte ratio after decoy
+                                  trimming.  [default: 3.0; x>=1.0]
+  \-\-json\-output                   Write machine\-readable run metadata to stdout.
+  \-\-output\-mode [script|binary]   Write an obfuscated shell script or Linux
+                                  loader binary.  [default: script]
+  \-\-env\-key TEXT                  Bind binary output to this environment key
+                                  (OBFUSH_ENV_KEY may override it).
+  \-\-no\-anti\-debug                 Disable best\-effort anti\-debug checks in
+                                  binary output.
+  \-\-checksum                      Write a SHA\-256 sidecar next to binary output
+                                  for external verification.
+  \-\-verify                        Run equivalence check in sandbox after emit.
+  \-\-test\-input PATH               Stdin to feed both scripts during verify.
+  \-v, \-\-verbose                   Show per\-layer statistics.
+  \-\-dry\-run                       Print what would be done; don't write file.
+  \-\-dump\-ast PATH                 Dump parsed AST to file (debug).
+  \-\-help\-advanced                 Show full Spectral0x00 documentation and exit.
+  \-\-version                       Show the version and exit.
+  \-h, \-\-help                      Show this message and exit.
+
+  Red Team Internal Use Only \-\- Spectral0x00
+.fi
+.SH DISTRIBUTION
+obfush is proprietary internal tooling. Use and redistribution are
+restricted by LICENSE and the organization's authorization process.
+This repository does not configure automatic public publication.

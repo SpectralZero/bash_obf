@@ -1,7 +1,6 @@
 """Tests for individual transformation layers."""
 
 import random
-import pytest
 from obfush.engine.ast_parser import parse_bash
 from obfush.engine.normalizer import normalize
 from obfush.engine.ast_emitter import emit
@@ -122,6 +121,33 @@ class TestEncode:
         result, stats = layer.transform(ast, config)
         output = emit(result)
         assert "eval" not in output
+
+
+class TestOpaqueConst:
+    def test_basic_opaque_constant(self):
+        from obfush.layers.opaque_const import LayerImpl
+        layer = LayerImpl()
+        ast = _prepare_ast("sleep 0\nexit 0")
+        result, stats = layer.transform(ast, _make_config(intensity=1.0))
+        output = emit(result)
+        assert "$((" in output
+        assert int(stats.custom["constants_obfuscated"]) == 2
+
+
+class TestCff:
+    def test_basic_dispatcher(self):
+        from obfush.layers.cff import LayerImpl
+        from obfush.utils.name_pool import NamePool
+        layer = LayerImpl()
+        ast = _prepare_ast("a=1\nb=2\nprintf ok")
+        rng = random.Random(42)
+        config = LayerConfig(
+            intensity=1.0, seed=42, rng=rng, name_pool=NamePool(rng),
+        )
+        result, stats = layer.transform(ast, config)
+        output = emit(result)
+        assert "while ((" in output
+        assert int(stats.custom["dispatchers_created"]) == 1
 
 
 class TestIndirection:

@@ -13,7 +13,6 @@ All generation uses a seeded RNG so output is deterministic per-seed.
 from __future__ import annotations
 
 import random
-from typing import Sequence
 
 
 # ── Template slots ───────────────────────────────────────────────────
@@ -133,8 +132,24 @@ class DecoyCorpus:
 
     def __init__(self, rng: random.Random) -> None:
         self.rng = rng
-        self._used_comments: set[str] = set()
-        self._used_inline: set[str] = set()
+        self._used_text: set[str] = set()
+        self._fallback_counter = 0
+
+    def _unique(self, factory) -> str:
+        """Generate text not previously returned by this corpus instance."""
+        for _ in range(256):
+            text = factory()
+            if text not in self._used_text:
+                self._used_text.add(text)
+                return text
+
+        base = factory()
+        while True:
+            self._fallback_counter += 1
+            text = f"{base} ({self._fallback_counter:x})"
+            if text not in self._used_text:
+                self._used_text.add(text)
+                return text
 
     def generate_comment(self) -> str:
         """Generate a realistic noop-comment string.
@@ -142,17 +157,13 @@ class DecoyCorpus:
         Format: "{Action} {component} {context}"
         Example: "Validate SSL certificate before resolution"
         """
-        # Try up to 5 times to avoid repeats within the same script
-        for _ in range(5):
+        def generate() -> str:
             action = self.rng.choice(ACTIONS)
             component = self.rng.choice(COMPONENTS)
             context = self.rng.choice(CONTEXTS)
-            comment = f"{action} {component} {context}"
-            if comment not in self._used_comments:
-                self._used_comments.add(comment)
-                return comment
-        # Fallback: just return whatever we got
-        return f"{self.rng.choice(ACTIONS)} {self.rng.choice(COMPONENTS)} {self.rng.choice(CONTEXTS)}"
+            return f"{action} {component} {context}"
+
+        return self._unique(generate)
 
     def generate_inline_comment(self) -> str:
         """Generate a realistic developer-style inline comment.
@@ -161,12 +172,14 @@ class DecoyCorpus:
         - Prefixed description: "# TODO: add retry logic for transient failures"
         - Metadata annotation:  "# Last verified: 2024-11-15"
         """
-        if self.rng.random() < 0.7:
-            prefix = self.rng.choice(INLINE_PREFIXES)
-            desc = self.rng.choice(INLINE_DESCRIPTIONS)
-            return f"{prefix} {desc}"
-        else:
+        def generate() -> str:
+            if self.rng.random() < 0.7:
+                prefix = self.rng.choice(INLINE_PREFIXES)
+                desc = self.rng.choice(INLINE_DESCRIPTIONS)
+                return f"{prefix} {desc}"
             return self.rng.choice(INLINE_METADATA)
+
+        return self._unique(generate)
 
     def generate_log_message(self) -> str:
         """Generate a log-style message.
@@ -174,10 +187,13 @@ class DecoyCorpus:
         Format: "[LEVEL] {subject} {action}"
         Example: "[INFO] Configuration validated"
         """
-        level = self.rng.choice(LOG_LEVELS)
-        subject = self.rng.choice(LOG_SUBJECTS)
-        action = self.rng.choice(LOG_ACTIONS)
-        return f"[{level}] {subject} {action}"
+        def generate() -> str:
+            level = self.rng.choice(LOG_LEVELS)
+            subject = self.rng.choice(LOG_SUBJECTS)
+            action = self.rng.choice(LOG_ACTIONS)
+            return f"[{level}] {subject} {action}"
+
+        return self._unique(generate)
 
     def generate_var_name(self, base: str = "") -> str:
         """Generate a realistic variable name for decoy assignments.

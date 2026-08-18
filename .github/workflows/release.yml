@@ -1,0 +1,110 @@
+name: Build release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit, tag, or branch to build
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build and test dependencies
+        run: python -m pip install --upgrade build twine ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest tests
+
+      - name: Run Ruff
+        run: python -m ruff check scripts tests/test_man_generation.py
+
+      - name: Verify generated manual
+        run: |
+          python scripts/generate_man.py
+          git diff --exit-code -- docs/obfush.1
+
+      - name: Build Python distributions
+        run: python -m build
+
+      - name: Validate Python distributions
+        run: python -m twine check dist/*
+
+      - name: Stage release bundle and checksums
+        run: |
+          mkdir -p release-bundle
+          cp dist/* release-bundle/
+          cp docs/obfush.1 CHANGELOG.md LICENSE SECURITY.md release-bundle/
+          cd release-bundle
+          sha256sum * > SHA256SUMS
+
+      - name: Upload internal workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfush-release-${{ github.run_id }}
+          path: release-bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+  standalone-cli:
+    name: Standalone CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and PyInstaller
+        run: python -m pip install ".[gui]" "pyinstaller>=6.10"
+
+      - name: Build standalone CLI
+        run: python -m PyInstaller --clean --noconfirm obfush.spec
+
+      - name: Smoke test standalone CLI
+        shell: bash
+        run: |
+          artifact="dist/obfush"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then artifact="dist/obfush.exe"; fi
+          "$artifact" --version
+          "$artifact" --help
+          printf 'printf "%s\\n" "standalone-smoke"\n' | \
+            "$artifact" - - --no-config --seed 42 --layers id-mangle --min-layers 1
+
+      - name: Upload standalone CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfush-cli-${{ runner.os }}-${{ github.run_id }}
+          path: |
+            dist/obfush
+            dist/obfush.exe
+          if-no-files-found: error
+          retention-days: 30
+
+# This workflow only builds and tests downloadable Actions artifacts. It does
+# not create a release, upload to a package index, or use publication secrets.

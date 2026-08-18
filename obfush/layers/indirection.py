@@ -9,7 +9,6 @@ index obfuscation.
 from __future__ import annotations
 
 import random
-from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
 
@@ -46,6 +45,8 @@ class IndirectionDispatcher:
         self._counter = 0
 
     def _next_id(self) -> str:
+        if self.config.name_pool is not None:
+            return self.config.name_pool.next_name()
         self._counter += 1
         return f"_d{self.rng.randint(0x100, 0xffff):04x}"
 
@@ -122,19 +123,28 @@ class IndirectionDispatcher:
         return self._func_maps + self._var_dispatches
 
 
-# Commands worth indirecting (external tools that reveal intent)
+# Commands worth indirecting — any command that reveals script intent.
+# Expanded far beyond the original network-tools-only set.
 _INDIRECTABLE_COMMANDS = frozenset({
+    # Network / security tools
     "curl", "wget", "nc", "ncat", "socat",
     "ssh", "scp", "rsync",
     "base64", "xxd", "openssl",
-    "cat", "grep", "awk", "sed",
-    "chmod", "chown", "mkdir", "rm",
+    # Standard I/O commands
+    "echo", "printf", "cat", "head", "tail", "tee",
+    "grep", "awk", "sed", "cut", "tr", "sort", "uniq", "wc",
+    # File operations
+    "chmod", "chown", "mkdir", "rm", "cp", "mv", "touch", "ln",
+    "find", "xargs", "stat", "file", "readlink",
+    # Archive
+    "tar", "gzip", "gunzip", "zip", "unzip",
+    # System / process
+    "kill", "pkill", "nohup", "sleep",
+    "date", "hostname", "uname", "whoami", "id",
+    "mount", "umount", "dd", "mktemp",
     "crontab", "systemctl",
-    "python", "python3", "perl", "ruby",
-    "bash", "sh",
-    "tar", "gzip", "zip",
-    "kill", "pkill",
-    "nohup", "sleep",
+    # Interpreters
+    "python", "python3", "perl", "ruby", "bash", "sh",
 })
 
 
@@ -153,10 +163,10 @@ def _indirect_walk(
     stats.nodes_visited += 1
 
     # Indirect command names
-    if node_type == "command" and not ast.get("_encoded") and not ast.get("_junk"):
+    if node_type == "command":
         parts = ast.get("parts", [])
         if (parts and parts[0].get("type") == "word"
-                and rng.random() < config.intensity * 0.5):
+                and rng.random() < config.intensity * 0.7):
             cmd_name = parts[0].get("value", "")
             if cmd_name in _INDIRECTABLE_COMMANDS:
                 indirect_expr, setup = dispatcher.indirect_command(cmd_name)

@@ -13,6 +13,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from obfush.utils.name_pool import NamePool
+
 
 @dataclass(frozen=True)
 class LayerConfig:
@@ -29,6 +31,10 @@ class LayerConfig:
     seed: int
     rng: random.Random
     eval_mode: str = "ok"
+    name_pool: NamePool | None = None
+    source_size: int = 0
+    max_size_ratio: float = 3.0
+    entropy_target: float = 4.5
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.intensity <= 1.0:
@@ -37,6 +43,16 @@ class LayerConfig:
             raise ValueError(
                 f"eval_mode must be 'ok', 'no-eval', or 'direct-exec', "
                 f"got '{self.eval_mode}'"
+            )
+        if self.source_size < 0:
+            raise ValueError(f"source_size must be non-negative, got {self.source_size}")
+        if self.max_size_ratio < 1.0:
+            raise ValueError(
+                f"max_size_ratio must be at least 1.0, got {self.max_size_ratio}"
+            )
+        if not 0.0 <= self.entropy_target <= 8.0:
+            raise ValueError(
+                f"entropy_target must be 0.0-8.0, got {self.entropy_target}"
             )
 
 
@@ -51,6 +67,8 @@ class LayerStats:
     nodes_modified: int = 0
     identifiers_mangled: int = 0
     strings_shredded: int = 0
+    split_reconstructions: int = 0
+    xor_reconstructions: int = 0
     commands_substituted: int = 0
     junk_blocks_injected: int = 0
     blocks_reordered: int = 0
@@ -58,6 +76,7 @@ class LayerStats:
     indirections_added: int = 0
     chunks_created: int = 0
     decoy_lines_added: int = 0
+    elapsed_ms: float = 0.0
     custom: dict[str, Any] = field(default_factory=dict)
 
 
@@ -76,6 +95,7 @@ class Layer(ABC):
 
     name: str = ""
     description: str = ""
+    never_rollback: bool = False
 
     @abstractmethod
     def transform(

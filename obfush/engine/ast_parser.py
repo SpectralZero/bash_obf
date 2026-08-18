@@ -94,9 +94,60 @@ def _operator(op: str, pos: tuple[int, int] | None = None) -> dict:
     return _node("operator", op=op, pos=pos)
 
 
+def _strip_heredoc_delimiter(body: str, delimiter: str) -> str:
+    """Remove the trailing closing delimiter that bashlex includes in a
+    heredoc body value.
+
+    bashlex stores the heredoc ``value`` as the content lines PLUS the
+    closing delimiter line (e.g. ``"line 1\\nline 2\\nEOF"``).  Keeping the
+    delimiter in the body makes the emitter print it twice (``EOF\\nEOF``)
+    and leaves nothing to attach a following redirect to.  We store the body
+    WITHOUT the delimiter so the emitter can add it back exactly once.
+    """
+    if not isinstance(body, str) or not delimiter:
+        return body
+    if body == delimiter:
+        return ""
+    for suffix in (f"\n{delimiter}\n", f"\n{delimiter}"):
+        if body.endswith(suffix):
+            return body[: -len(suffix)]
+    return body
+
+
+def _protect_loop_variable(parts: list) -> None:
+    """Mark a ``for NAME in ...`` / ``select NAME in ...`` iterator variable
+    so downstream layers keep it a bare identifier.
+
+    Without this, string/command layers can rewrite the word into an
+    expression like ``"$(printf '\\x64\\x69\\x72')"`` — which bash rejects as
+    a for-loop variable (``not a valid identifier``), breaking the loop.
+    Marking it ``raw`` makes the emitter print it verbatim and makes
+    str-shred skip it, while id-mangle still rewrites its ``value`` in place
+    so it stays consistent with the body's ``$NAME`` references.
+    """
+    seen_keyword = False
+    for part in parts:
+        if not isinstance(part, dict) or part.get("type") != "word":
+            continue
+        value = part.get("value", "")
+        if not seen_keyword:
+            if value in ("for", "select"):
+                seen_keyword = True
+            continue
+        # The first word after the keyword is the iterator variable.
+        if value == "in":
+            return
+        if re.fullmatch(r"[a-zA-Z_]\w*", value or ""):
+            part["raw"] = value
+        return
+
+
 # ──────────────────────────────────────────────────────────────────────
 # bashlex AST → internal AST converter
 # ──────────────────────────────────────────────────────────────────────
+
+# Source text set during parse_bash() — used by _convert_node to detect quotes.
+_parse_source: str = ""
 
 def _convert_node(node: Any) -> dict:
     """Recursively convert a bashlex AST node to internal format."""
@@ -107,9 +158,23 @@ def _convert_node(node: Any) -> dict:
         if hasattr(node, "parts") and node.parts:
             parts = [_convert_node(p) for p in node.parts]
 
-        # Detect assignments: word contains '=' and is first in command
+        # Detect original quoting by inspecting the raw source at node.pos.
+        # bashlex strips quotes from node.word but preserves them in the
+        # source positions, so "$out" at pos (5,11) gives raw '"$out"'.
+        quoted = None
+        if _parse_source and node.pos:
+            raw_text = _parse_source[node.pos[0]:node.pos[1]]
+            if len(raw_text) >= 2:
+                if raw_text[0] == '"' and raw_text[-1] == '"':
+                    quoted = "double"
+                elif raw_text[0] == "'" and raw_text[-1] == "'":
+                    quoted = "single"
+
         word_val = node.word
-        return _word(word_val, pos=node.pos, parts=parts if parts else None)
+        n = _word(word_val, pos=node.pos, parts=parts if parts else None)
+        if quoted:
+            n["quoted"] = quoted
+        return n
 
     elif kind == "command":
         parts = [_convert_node(p) for p in node.parts]
@@ -154,9 +219,16 @@ def _convert_node(node: Any) -> dict:
             parts = [_convert_node(p) for p in node.list]
         elif hasattr(node, "parts") and node.parts:
             parts = [_convert_node(p) for p in node.parts]
+        # bashlex attaches `{ ...; } > file`, `( ...; ) 2>&1`, etc. as
+        # `.redirects` on the compound — capture them so the emitter can
+        # re-attach them (otherwise the output redirection is silently lost).
+        redirects = [
+            _convert_node(r) for r in (getattr(node, "redirects", None) or [])
+        ]
+        extra = {"redirects": redirects} if redirects else {}
         return _compound(
             kind=getattr(node, "compound_kind", "group"),
-            parts=parts, pos=node.pos,
+            parts=parts, pos=node.pos, **extra,
         )
 
     elif kind == "function":
@@ -186,9 +258,11 @@ def _convert_node(node: Any) -> dict:
         heredoc = None
         raw_heredoc = getattr(node, "heredoc", None)
         if raw_heredoc is not None:
+            hd_delimiter = getattr(raw_heredoc, "delimiter", "EOF")
+            hd_body = getattr(raw_heredoc, "value", str(raw_heredoc))
             heredoc = _heredoc(
-                body=getattr(raw_heredoc, "value", str(raw_heredoc)),
-                delimiter=getattr(raw_heredoc, "delimiter", "EOF"),
+                body=_strip_heredoc_delimiter(hd_body, hd_delimiter),
+                delimiter=hd_delimiter,
             )
         return _redirect(redirect_type, target, fd=fd, pos=node.pos, heredoc=heredoc)
 
@@ -209,9 +283,14 @@ def _convert_node(node: Any) -> dict:
         return _expansion("tilde", value=value, pos=node.pos)
 
     elif kind == "heredoc":
-        body = node.value if hasattr(node, "value") else ""
-        delimiter = getattr(node, "delimiter", "EOF")
-        return _heredoc(body=body, delimiter=delimiter, pos=node.pos)
+        raw_body = getattr(node, "value", "")
+        body = raw_body if isinstance(raw_body, str) else str(raw_body)
+        raw_delimiter = getattr(node, "delimiter", "EOF")
+        delimiter = raw_delimiter if isinstance(raw_delimiter, str) else str(raw_delimiter)
+        return _heredoc(
+            body=_strip_heredoc_delimiter(body, delimiter),
+            delimiter=delimiter, pos=node.pos,
+        )
 
     elif kind == "assignment":
         # bashlex stores assignments as a single .word like 'name=value';
@@ -235,6 +314,8 @@ def _convert_node(node: Any) -> dict:
                 if v:
                     parts = [_convert_node(p) for p in v]
                     break
+        if kind in ("for", "select"):
+            _protect_loop_variable(parts)
         return _compound(kind=kind, parts=parts, pos=node.pos)
 
     elif kind == "reservedword":
@@ -571,11 +652,21 @@ def _detect_assignments(ast: dict) -> dict:
                 if part.get("type") == "word":
                     match = _ASSIGNMENT_RE.match(part.get("value", ""))
                     if match and not part.get("parts"):
-                        new_parts.append(_assignment(
+                        assign = _assignment(
                             name=match.group(1),
                             value=match.group(2),
                             pos=part.get("pos"),
-                        ))
+                        )
+                        # Distinguish a genuine array literal  name=(...)  from
+                        # a scalar whose value merely starts with '(' (e.g.
+                        # x="(literal)").  Real arrays are captured verbatim by
+                        # the array-assignment preprocessor and carry a matching
+                        # ``raw``; scalars parsed natively by bashlex do not.
+                        raw = part.get("raw")
+                        if (isinstance(raw, str) and match.group(2).startswith("(")
+                                and re.match(r'[a-zA-Z_]\w*\+?=\(', raw)):
+                            assign["array"] = True
+                        new_parts.append(assign)
                         continue
                 new_parts.append(_walk(part))
             node["parts"] = new_parts
@@ -624,7 +715,7 @@ def parse_bash(source: str) -> dict:
     # Parse with bashlex
     try:
         parts = bashlex.parse(processed)
-    except Exception as e:
+    except Exception:
         # Total fallback: treat the (shebang-stripped) script as a single
         # opaque node, but preserve the shebang separately so the emitter
         # can put it on line 1 and entropy-mask doesn't inject above it.
@@ -636,8 +727,11 @@ def parse_bash(source: str) -> dict:
             fallback_ast["shebang"] = shebang
         return fallback_ast
 
-    # Convert bashlex AST to internal format
+    # Convert bashlex AST to internal format — set source for quote detection
+    global _parse_source
+    _parse_source = processed
     body = [_convert_node(part) for part in parts]
+    _parse_source = ""
 
     # Restore placeholders
     ast = _script(body=body)

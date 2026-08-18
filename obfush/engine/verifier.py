@@ -30,7 +30,7 @@ class VerificationError(Exception):
 
 
 class Verifier:
-    """Sandbox equivalence tester.
+    """Process-isolated equivalence tester.
 
     Executes original and obfuscated scripts and compares:
     - stdout (after normalization)
@@ -95,6 +95,18 @@ class Verifier:
 
         # Run obfuscated
         obf_result = self._run_script(obfuscated_source, stdin_data)
+
+        execution_diff: dict[str, str] = {}
+        for label, result in (("original", orig_result), ("obfuscated", obf_result)):
+            if result.get("timed_out"):
+                execution_diff[label] = "timeout"
+            elif result.get("error"):
+                execution_diff[label] = str(result["error"])
+        if execution_diff:
+            raise VerificationError(
+                "Equivalence check could not complete script execution",
+                diff={"execution": execution_diff},
+            )
 
         # Optionally normalise
         if self.normalize:
@@ -186,8 +198,11 @@ class Verifier:
             script_path = f.name
 
         try:
+            bash_path = self.bash_path
+            if not bash_path:
+                raise RuntimeError("No bash executable is configured")
             result = subprocess.run(
-                [self.bash_path, script_path],
+                [bash_path, script_path],
                 input=stdin_data,
                 capture_output=True,
                 timeout=self.timeout,
@@ -197,18 +212,24 @@ class Verifier:
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "exit_code": result.returncode,
+                "timed_out": False,
+                "error": None,
             }
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             return {
-                "stdout": b"",
-                "stderr": b"TIMEOUT",
+                "stdout": exc.stdout or b"",
+                "stderr": exc.stderr or b"TIMEOUT",
                 "exit_code": -1,
+                "timed_out": True,
+                "error": None,
             }
         except Exception as e:
             return {
                 "stdout": b"",
                 "stderr": str(e).encode(),
                 "exit_code": -2,
+                "timed_out": False,
+                "error": f"{type(e).__name__}: {e}",
             }
         finally:
             try:
@@ -222,6 +243,12 @@ class Verifier:
         for key in ("AWS_SECRET_ACCESS_KEY", "API_KEY", "TOKEN",
                      "PASSWORD", "PRIVATE_KEY"):
             env.pop(key, None)
+        for key in list(env):
+            if key.startswith("BASH_FUNC_"):
+                env.pop(key, None)
+        for key in ("BASH_ENV", "ENV", "CDPATH", "PROMPT_COMMAND"):
+            env.pop(key, None)
+        env["LC_ALL"] = "C"
         return env
 
     @staticmethod

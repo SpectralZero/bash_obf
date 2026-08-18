@@ -1,0 +1,40 @@
+name: Build container artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --tag obfush:${{ github.sha }} .
+
+      - name: Verify CLI and non-root runtime
+        run: |
+          docker run --rm obfush:${{ github.sha }} --version
+          docker run --rm --entrypoint python obfush:${{ github.sha }} \
+            -c "import os; assert os.getuid() != 0"
+          printf 'printf "%s\\n" "container-smoke"\n' | \
+            docker run --rm -i obfush:${{ github.sha }} \
+              - - --no-config --seed 42 --layers id-mangle --min-layers 1
+
+      - name: Export image
+        run: docker save obfush:${{ github.sha }} | gzip -n > obfush-container.tar.gz
+
+      - name: Upload internal workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfush-container-${{ github.sha }}
+          path: obfush-container.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+# This workflow deliberately has no registry login or push step. Artifacts stay
+# in the manually dispatched workflow run for authorized internal retrieval.

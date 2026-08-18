@@ -8,15 +8,15 @@ No readable string appears in the output.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from obfush.layers.base import Layer, LayerConfig, LayerStats
-from obfush.utils.string_utils import random_shred, to_hex_escape
+from obfush.utils.string_utils import random_shred
 
 
 class LayerImpl(Layer):
     name = "str-shred"
     description = "String literal fragmentation"
+    never_rollback = True
 
     # Strings shorter than this are always shredded
     MIN_SHRED_LEN = 1
@@ -25,7 +25,6 @@ class LayerImpl(Layer):
 
     def transform(self, ast: dict, config: LayerConfig) -> tuple[dict, LayerStats]:
         stats = LayerStats()
-        rng = config.rng
         ast = _shred_walk(ast, config, stats)
         return ast, stats
 
@@ -38,12 +37,24 @@ _SHEBANG_RE = re.compile(r'^#!')
 _FORMAT_SPEC_RE = re.compile(r'%[-+0 #]*\d*\.?\d*[diouxXeEfFgGaAcspn%]')
 _GLOB_RE = re.compile(r'[*?\[\]]')
 
+# Declaration / scope keywords that bash must see as *literal* words at parse
+# time.  They govern how the rest of the simple command is parsed — most
+# importantly, they enable array-assignment syntax  name=(...).  Shredding
+# `local` into "$(...)" turns  `local -a dirs=("$@")`  into a parse error
+# because `dirs=(...)` then sits in ordinary argument position.
+_DECLARATION_KEYWORDS = frozenset({
+    "local", "declare", "typeset", "readonly", "export",
+})
+
 
 def _should_shred(value: str, node: dict) -> bool:
     """Decide whether a string value should be shredded."""
     if not value or value in LayerImpl.SKIP_PATTERNS:
         return False
     if _SHEBANG_RE.match(value):
+        return False
+    # Declaration keywords must stay literal (see note above).
+    if value in _DECLARATION_KEYWORDS:
         return False
     # Don't shred single-char operator-like strings
     if len(value) == 1 and value in "=<>|&;(){}!":
@@ -87,7 +98,7 @@ def _is_shell_syntax_value(value: str) -> bool:
     return False
 
 
-def _shred_value(value: str, config: LayerConfig) -> str | tuple[list[str], str]:
+def _shred_value(value: str, config: LayerConfig) -> str:
     """Shred a string value, respecting format specifiers and globs."""
     rng = config.rng
 
@@ -99,7 +110,7 @@ def _shred_value(value: str, config: LayerConfig) -> str | tuple[list[str], str]
     if _FORMAT_SPEC_RE.search(value):
         return _shred_with_format_specs(value, config)
 
-    return random_shred(value, rng, config.eval_mode)
+    return random_shred(value, rng, config.eval_mode, config.name_pool)
 
 
 def _shred_with_globs(value: str, config: LayerConfig) -> str:
@@ -112,21 +123,14 @@ def _shred_with_globs(value: str, config: LayerConfig) -> str:
         if start > last_end:
             segment = value[last_end:start]
             result = random_shred(segment, config.rng, config.eval_mode)
-            if isinstance(result, tuple):
-                # Variable reconstruction — just use hex for globs
-                parts.append(to_hex_escape(segment))
-            else:
-                parts.append(result)
+            parts.append(result)
         parts.append(match.group())  # preserve glob char
         last_end = end
 
     if last_end < len(value):
         segment = value[last_end:]
         result = random_shred(segment, config.rng, config.eval_mode)
-        if isinstance(result, tuple):
-            parts.append(to_hex_escape(segment))
-        else:
-            parts.append(result)
+        parts.append(result)
 
     return "".join(parts)
 
@@ -141,20 +145,18 @@ def _shred_with_format_specs(value: str, config: LayerConfig) -> str:
         if start > last_end:
             segment = value[last_end:start]
             result = random_shred(segment, config.rng, config.eval_mode)
-            if isinstance(result, tuple):
-                parts.append(to_hex_escape(segment))
-            else:
-                parts.append(result)
-        parts.append(match.group())  # preserve format spec
+            parts.append(result)
+        # Keep the format token inside the same shell word as adjacent
+        # reconstructed fragments. A bare %s followed by an ANSI-C quote is
+        # parsed as two printf arguments after the emitter re-quotes words.
+        format_spec = match.group().replace("'", "'\\''")
+        parts.append(f"'{format_spec}'")
         last_end = end
 
     if last_end < len(value):
         segment = value[last_end:]
         result = random_shred(segment, config.rng, config.eval_mode)
-        if isinstance(result, tuple):
-            parts.append(to_hex_escape(segment))
-        else:
-            parts.append(result)
+        parts.append(result)
 
     return "".join(parts)
 
@@ -171,13 +173,18 @@ def _shred_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
         value = ast.get("value", "")
         if _should_shred(value, ast):
             result = _shred_value(value, config)
-            if isinstance(result, tuple):
-                # Variable reconstruction: store setup + expression
-                assignments, expr = result
-                ast["value"] = expr
-                ast["_shred_setup"] = assignments
-            else:
-                ast["value"] = result
+            ast["value"] = result
+            # The shredded result is a complete, self-quoted bash expression
+            # (hex/octal ANSI-C quotes, quoted concatenations, or "$(...)").
+            # Any recorded original quoting ("single"/"double") is now stale;
+            # leaving it makes _emit_word re-wrap the expression, e.g.
+            #   'single'  +  '%s'$'\x5c\x6e'  ->  ''%s'$'\x5c\x6e''
+            # which corrupts the escapes ( \x5c\x6e -> literal x5cx6e ).
+            ast.pop("quoted", None)
+            if "$(" in result and "; printf '%s'" in result:
+                stats.split_reconstructions += 1
+            if "printf -v" in result and " ^ " in result:
+                stats.xor_reconstructions += 1
             stats.strings_shredded += 1
             stats.nodes_modified += 1
 
@@ -186,12 +193,11 @@ def _shred_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
         value = ast.get("value", "")
         if isinstance(value, str) and _should_shred(value, ast):
             result = _shred_value(value, config)
-            if isinstance(result, tuple):
-                assignments, expr = result
-                ast["value"] = expr
-                ast["_shred_setup"] = assignments
-            else:
-                ast["value"] = result
+            ast["value"] = result
+            if "$(" in result and "; printf '%s'" in result:
+                stats.split_reconstructions += 1
+            if "printf -v" in result and " ^ " in result:
+                stats.xor_reconstructions += 1
             stats.strings_shredded += 1
             stats.nodes_modified += 1
 
@@ -204,10 +210,7 @@ def _shred_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
             for line in lines:
                 if line.strip() and _should_shred(line, ast):
                     result = random_shred(line, config.rng, config.eval_mode)
-                    if isinstance(result, tuple):
-                        shredded_lines.append(to_hex_escape(line))
-                    else:
-                        shredded_lines.append(result)
+                    shredded_lines.append(result)
                     stats.strings_shredded += 1
                 else:
                     shredded_lines.append(line)

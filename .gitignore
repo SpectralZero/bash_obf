@@ -20,6 +20,7 @@ wheels/
 share/python-wheels/
 *.manifest
 *.spec
+!obfush.spec
 MANIFEST
 
 # ─── Virtual environments ──────────────────────────────────────────────
