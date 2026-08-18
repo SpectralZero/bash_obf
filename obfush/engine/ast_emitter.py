@@ -102,6 +102,12 @@ def _emit_word(node: dict, depth: int) -> str:
     value = node.get("value", "")
     if not value:
         return ""
+    # Literal text that contains '$' or '`' which the source escaped (\$, \`)
+    # or otherwise made non-expanding (parser tagged it ``literal``).  Emit it
+    # single-quoted so bash performs NO expansion and word-splitting, exactly
+    # reproducing the original text.
+    if node.get("literal"):
+        return "'" + value.replace("'", "'\\''") + "'"
     # If the parser recorded the original quoting style, respect it.
     quoted = node.get("quoted")
     if quoted == "double":

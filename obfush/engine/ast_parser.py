@@ -174,6 +174,15 @@ def _convert_node(node: Any) -> dict:
         n = _word(word_val, pos=node.pos, parts=parts if parts else None)
         if quoted:
             n["quoted"] = quoted
+        # Literal '$' / '`' preservation:  bashlex reports NO expansion part
+        # for this word, yet the value still contains a '$' or backtick.  That
+        # means the source escaped it (\$, \`) or it is otherwise literal
+        # (e.g.  "\${#var} length" ).  Mark it so id-mangle won't rewrite names
+        # inside it and the emitter won't let it expand.  Real expansions
+        # (simple or complex) always carry a part or a restored ``raw``, so
+        # they are never mis-tagged here.
+        if quoted and not parts and ("$" in word_val or "`" in word_val):
+            n["literal"] = True
         return n
 
     elif kind == "command":
@@ -350,6 +359,17 @@ _ANSI_C_QUOTE_RE = re.compile(r"\$'(?:[^'\\]|\\.)*'")
 _SIMPLE_EXPANSION_RE = re.compile(r'^[a-zA-Z_]\w*$|^\d+$|^[#?$!@*-]$')
 
 
+def _is_escaped(source: str, i: int) -> bool:
+    """True if ``source[i]`` is preceded by an odd number of backslashes
+    (i.e. it is backslash-escaped)."""
+    backslashes = 0
+    k = i - 1
+    while k >= 0 and source[k] == '\\':
+        backslashes += 1
+        k -= 1
+    return backslashes % 2 == 1
+
+
 def _find_complex_params(source: str) -> list[tuple[int, int]]:
     """Find ${...} expansions that bashlex can't parse, using brace-counting.
 
@@ -363,6 +383,12 @@ def _find_complex_params(source: str) -> list[tuple[int, int]]:
 
     while i < n - 1:
         if source[i] == '$' and source[i + 1] == '{':
+            # A backslash-escaped '$' (\${...}) is a *literal* dollar sign, not
+            # an expansion — bash prints it verbatim.  Do not placeholder it,
+            # or the escape is lost and the text expands/word-splits at runtime.
+            if _is_escaped(source, i):
+                i += 1
+                continue
             start = i
             depth = 1
             j = i + 2
@@ -716,13 +742,18 @@ def parse_bash(source: str) -> dict:
     try:
         parts = bashlex.parse(processed)
     except Exception:
-        # Total fallback: treat the (shebang-stripped) script as a single
-        # opaque node, but preserve the shebang separately so the emitter
-        # can put it on line 1 and entropy-mask doesn't inject above it.
-        fallback_ast = _script(body=[_word(
+        # Total fallback: bashlex could not parse this script (an unsupported
+        # construct — arithmetic form, process substitution, C-style for,
+        # associative-array literal, etc.).  Emit the (shebang-stripped) script
+        # verbatim as a single OPAQUE node and mark it so no layer transforms
+        # it.  Silently preserving an unparsable script (unobfuscated) is far
+        # safer than letting regex-based passes mangle it into broken bash.
+        opaque = _word(
             value=parse_source, raw=parse_source,
             pos=(0, len(parse_source)),
-        )])
+        )
+        opaque["opaque"] = True
+        fallback_ast = _script(body=[opaque])
         if shebang:
             fallback_ast["shebang"] = shebang
         return fallback_ast

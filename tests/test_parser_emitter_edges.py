@@ -197,6 +197,7 @@ def test_malformed_shell_source_uses_opaque_word_fallback():
     assert ast["body"] == [{
         "type": "word", "value": 'echo "unterminated',
         "pos": (0, len('echo "unterminated')), "raw": 'echo "unterminated',
+        "opaque": True,
     }]
     assert emit(ast) == 'echo "unterminated\n'
 

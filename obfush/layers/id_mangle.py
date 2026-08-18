@@ -526,7 +526,7 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                                 part["value"] = mangle_map[val]
 
         # Word values (variable references, command arguments)
-        if node.get("type") == "word":
+        if node.get("type") == "word" and not node.get("literal") and not node.get("opaque"):
             value = node.get("value", "")
             if value:
                 node["value"] = _mangle_string(value)
