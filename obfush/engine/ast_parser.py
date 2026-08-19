@@ -295,7 +295,20 @@ def _convert_node(node: Any) -> dict:
         heredoc = None
         raw_heredoc = getattr(node, "heredoc", None)
         if raw_heredoc is not None:
-            hd_delimiter = getattr(raw_heredoc, "delimiter", "EOF")
+            # The heredoc delimiter is the redirect's TARGET word (`<<A` -> "A").
+            # bashlex's heredoc node does not carry the delimiter, so relying on
+            # ``raw_heredoc.delimiter`` yields a wrong "EOF" default; for any
+            # non-EOF delimiter that makes ``_strip_heredoc_delimiter`` fail, so
+            # the body absorbs the terminator line (`cat <<A\nfirst\nA` -> the
+            # body wrongly becomes "first\nA").  Two adjacent heredocs on one line
+            # (`cat <<A; cat <<B`) always hit this.
+            if isinstance(target, dict):
+                hd_delimiter = target.get("value") or getattr(
+                    raw_heredoc, "delimiter", "EOF")
+            elif isinstance(target, str) and target:
+                hd_delimiter = target
+            else:
+                hd_delimiter = getattr(raw_heredoc, "delimiter", "EOF")
             hd_body = getattr(raw_heredoc, "value", str(raw_heredoc))
             heredoc = _heredoc(
                 body=_strip_heredoc_delimiter(hd_body, hd_delimiter),

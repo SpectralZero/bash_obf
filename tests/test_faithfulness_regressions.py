@@ -400,3 +400,19 @@ def test_empty_quoted_test_operand_preserved():
     # (or `[[ -z ]]` after test-style morphing), a syntax error.
     src = 'if test 3 -gt 2 && test -z ""; then printf \'ok\\n\'; fi\n'
     _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_heredoc_two_adjacent_on_one_line():
+    # Two heredocs on one command line: the first body must not absorb the
+    # second's content; each terminates at its own delimiter.
+    src = "cat <<A; cat <<B\nfirst\nA\nsecond\nB\n"
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_heredoc_non_eof_delimiter_preserved():
+    # A heredoc with a non-EOF delimiter must strip exactly its terminator, not
+    # default to EOF (which left the delimiter line inside the body).
+    src = "cat <<END\nhello\nEND\n"
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)

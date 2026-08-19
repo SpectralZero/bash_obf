@@ -124,17 +124,11 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── emitter: two heredocs on one command line ───────────────────────
-    KnownDivergence(
-        case="heredoc_two_adjacent", mutation="*",
-        root_cause="heredoc_multiple_per_line",
-        reason=(
-            "for two heredocs on one line ('cat <<A; cat <<B'), the emitter lets the "
-            "first heredoc body absorb the following line(s) (body becomes 'first\\nA' "
-            "instead of 'first'), corrupting both outputs. Fix: emit multiple heredoc "
-            "bodies for one command line in order, each terminated at its own delimiter."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── emitter: two heredocs on one command line — FIXED (2026-08-19) ──
+    # heredoc_two_adjacent: the parser derived the delimiter from the redirect
+    # TARGET word (`<<A` -> "A") instead of defaulting to "EOF", so the body no
+    # longer absorbs the terminator line.  Also fixes any non-EOF single heredoc.
+    # Locked by tests/test_faithfulness_regressions.py.
 
     # ── test -> [[ ]] conversion drops an empty operand — FIXED (2026-08-19) ──
     # test_builtin: the emitter dropped an empty QUOTED word ( `test -z ""` ->
