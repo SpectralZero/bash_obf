@@ -182,3 +182,29 @@ def test_report_style_script_end_to_end():
         'main "$(mktemp)" a b c\n'
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS)
+
+
+@requires_bash
+def test_positional_param_digit_not_constified():
+    # opaque-const must not rewrite the digit of a positional parameter: "$1"
+    # must stay "$1" and never become "$((1))" (which drops the argument).
+    src = (
+        'is_even() { (( $1 % 2 == 0 )); }\n'
+        'for n in 1 2 3 4; do\n'
+        '    if is_even "$n"; then printf "%d:even\\n" "$n"\n'
+        '    else printf "%d:odd\\n" "$n"; fi\n'
+        'done\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["opaque-const"], intensity=1.0)
+    _assert_equivalent(src)
+
+
+@requires_bash
+def test_brace_positional_param_not_constified():
+    # "${10}" style positional params must also survive opaque-const.
+    src = (
+        'f() { printf "%s\\n" "${10}"; }\n'
+        'f a b c d e f g h i tenth\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["opaque-const"], intensity=1.0)
+    _assert_equivalent(src)
