@@ -313,3 +313,45 @@ def test_id_mangle_prefix_expansion_excluded():
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["id-mangle"], intensity=1.0)
     _assert_equivalent(src)
+
+
+# ── state mutations must keep their effect and exit-status semantics ─────
+# flow-obfusc must not subshell/opaque-wrap a state mutation; encode must not
+# eval-wrap a bare assignment or a $?-reading command.
+
+@requires_bash
+def test_flow_arith_assignment_not_subshelled():
+    # (( y = ... )) assigns in the current shell; subshell-wrapping loses it.
+    src = (
+        "(( y = 3 + 4 * 2 ))\n"
+        'printf "%d\\n" "$y"\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["flow-obfusc"], intensity=1.0)
+    _assert_equivalent(src)
+
+
+@requires_bash
+def test_encode_bare_readonly_assignment_exit_status():
+    # A failed readonly reassignment has bash-specific exit-status semantics;
+    # the encode layer must not eval-wrap the bare assignment (which changes it).
+    src = (
+        "readonly r=constant\n"
+        'r=changed 2>/dev/null || printf "blocked\\n"\n'
+        'printf "%s\\n" "$r"\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["encode"], intensity=1.0)
+    _assert_equivalent(src)
+
+
+@requires_bash
+def test_encode_dollar_question_preserved():
+    # $? must reflect the prior command, not the encode decode-pipeline.
+    src = (
+        "false\n"
+        "s1=$?\n"
+        "true\n"
+        "s2=$?\n"
+        'printf "%d:%d\\n" "$s1" "$s2"\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["encode"], intensity=1.0)
+    _assert_equivalent(src)

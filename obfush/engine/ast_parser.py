@@ -159,9 +159,11 @@ def _bash_double_dequote(s: str) -> str:
     while i < n:
         c = s[i]
         if c == '\\' and i + 1 < n and s[i + 1] in '$`"\\\n':
-            out.append(s[i + 1]); i += 2
+            out.append(s[i + 1])
+            i += 2
         else:
-            out.append(c); i += 1
+            out.append(c)
+            i += 1
     return ''.join(out)
 
 

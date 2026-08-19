@@ -71,11 +71,15 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     # ── Opaque predicate wrapping ──
     # Skip nodes marked _no_wrap (compound-condition children — wrapping
     # them produces invalid bash like  if if [[ ... ]]; then ... fi; then).
-    # Safe for state-mutating commands: `if <always-true>; then CMD; fi`
-    # still runs CMD in the current shell.
+    # Also skip state-mutating commands: while `if <true>; then CMD; fi` runs
+    # CMD in the current shell, compound-wrapping a bare/arith/readonly
+    # assignment can alter exit-status propagation (e.g. a failed readonly
+    # reassignment under set -e or in a || list).  The rng draw is kept before
+    # the guard so seeds stay comparable for non-mutating commands.
     if (node_type == "command"
             and not ast.get("_no_wrap")
-            and rng.random() < config.intensity * 0.3):
+            and rng.random() < config.intensity * 0.3
+            and not orig_mutates_state):
         ast = _wrap_opaque_predicate(ast, rng)
         stats.nodes_modified += 1
 
@@ -151,6 +155,13 @@ def _mutates_shell_state(node: dict) -> bool:
     if not parts or not isinstance(parts[0], dict) or parts[0].get("type") != "word":
         return False
     cmd = parts[0].get("value", "")
+    # Arithmetic command  (( ... ))  can assign or increment shell variables
+    # ( (( y = 5 )),  (( x++ )) ).  It is emitted as a single word, so it is not
+    # caught by the assignment-node / declaration checks; treat it as a state
+    # mutation so it is never subshell-wrapped (which would discard the effect).
+    stripped = cmd.strip()
+    if stripped.startswith("((") and stripped.endswith("))"):
+        return True
     return (
         cmd in _BARRIER_COMMANDS
         or cmd in _DECLARATION_KEYWORDS
@@ -481,8 +492,8 @@ def _generate_opaque_predicate(rng: random.Random) -> str:
             '[[ -r /dev/null ]]',
             '[[ -e /dev/zero ]]',
             f'[[ $(( {rng.randint(1, 255)} & {rng.randint(1, 255)} | 1 )) -gt 0 ]]',
-            f'[[ -n "${{BASH:-/bin/bash}}" ]]',
-            f'[[ "${{BASH_VERSION:0:1}}" -gt 0 ]] 2>/dev/null || true && [[ 1 -eq 1 ]]',
+            '[[ -n "${BASH:-/bin/bash}" ]]',
+            '[[ "${BASH_VERSION:0:1}" -gt 0 ]] 2>/dev/null || true && [[ 1 -eq 1 ]]',
         ]
         return rng.choice(checks)
 

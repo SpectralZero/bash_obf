@@ -73,29 +73,12 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── flow-obfusc wrapping a state-mutating command ───────────────────
-    KnownDivergence(
-        case="arith_double_paren", mutation="*",
-        root_cause="flow_wrap_state_mutation",
-        reason=(
-            "flow-obfusc wraps a bare (( y = ... )) arithmetic ASSIGNMENT in a subshell "
-            "( ( ... ) ), so the assignment to y is confined to the subshell and lost; "
-            "the later \"$y\" reads empty (0, or unbound under set -u). Fix: flow-obfusc "
-            "must not subshell-wrap commands that mutate shell state (bare assignments, "
-            "(( var=... )), set/shift/readonly/export)."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="scope_readonly", mutation="*",
-        root_cause="flow_wrap_state_mutation",
-        reason=(
-            "flow-obfusc wraps the bare assignment 'r=changed' in "
-            "'if TRUE; then r=changed; fi || ...', changing exit-status propagation of "
-            "the readonly-assignment failure (the || fires and set -e no longer aborts). "
-            "Fix: same as flow_wrap_state_mutation -- do not compound-wrap bare "
-            "assignments / state-mutating commands (treat like the set/shift exclusions)."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── flow-obfusc / encode wrapping a state mutation — FIXED (2026-08-19) ──
+    # arith_double_paren: flow-obfusc no longer subshell-wraps (( var=... ))
+    #   arithmetic-assignment commands, nor opaque-predicate-wraps state mutators.
+    # scope_readonly: the encode layer no longer eval-wraps a bare assignment
+    #   (which changed the exit status of a failed readonly reassignment).
+    # Both locked by tests/test_faithfulness_regressions.py.
 
     # ── id-mangle: rename misses a reference site — FIXED (2026-08-19) ───
     # heredoc_expand / expand_arithmetic_index / expand_prefix_names: id-mangle
@@ -186,18 +169,10 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── encode/pipeline resets $? before it is read ─────────────────────
-    KnownDivergence(
-        case="io_dollar_hash_status", mutation="*",
-        root_cause="exit_status_clobber",
-        reason=(
-            "encode/str-shred wraps commands as eval \"$(...|base64 -d)\"; the "
-            "command-substitution pipeline resets $? before an encoded 'x=$?' reads it, "
-            "so the captured status is 0 instead of the prior command's. Fix: never "
-            "encode/shred a command whose text references $?. (Masked under set -e, "
-            "where both variants abort at the prior command.)"
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── encode/pipeline resets $? before it is read — FIXED (2026-08-19) ──
+    # io_dollar_hash_status: the encode layer no longer eval-wraps a command that
+    # reads $? (the decode pipeline in eval "$(...|base64 -d)" reset it first) nor
+    # a bare assignment.  Locked by tests/test_faithfulness_regressions.py.
 )
 
 

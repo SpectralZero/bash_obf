@@ -84,6 +84,16 @@ def _encode_command(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     if not cmd_str or len(cmd_str) < 3:
         return ast
 
+    # eval "$(...|base64 -d)" runs a decode pipeline before the command (which
+    # resets $?) and changes the exit-status semantics of a bare assignment
+    # (a failed readonly reassignment returns differently through eval).  Skip
+    # commands where wrapping would diverge, in every eval-mode.
+    if _changes_exit_status(ast, cmd_str):
+        stats.custom["exit_status_unsafe_skipped"] = str(
+            int(stats.custom.get("exit_status_unsafe_skipped", "0")) + 1
+        )
+        return ast
+
     if mode in ("no-eval", "direct-exec") and not _is_subprocess_safe(ast, cmd_str):
         stats.custom["subprocess_unsafe_skipped"] = str(
             int(stats.custom.get("subprocess_unsafe_skipped", "0")) + 1
@@ -198,3 +208,29 @@ def _is_subprocess_safe(ast: dict, cmd_str: str) -> bool:
         return False
 
     return True
+
+
+def _changes_exit_status(ast: dict, cmd_str: str) -> bool:
+    """True if wrapping this command in ``eval "$(...)"`` would change its exit
+    status or clobber ``$?``.
+
+    Two cases:
+      * The command reads ``$?`` — the decode pipeline in
+        ``eval "$(...|base64 -d)"`` runs first and resets ``$?``, so a captured
+        ``x=$?`` would see 0 instead of the prior command's status.
+      * The command is a bare assignment (``name=value``, optionally with
+        redirects, and no command word) — ``eval`` changes the exit-status
+        semantics of a failed assignment such as a readonly reassignment.
+    """
+    if "$?" in cmd_str:
+        return True
+    parts = ast.get("parts") or []
+    non_redirect = [
+        p for p in parts
+        if isinstance(p, dict) and p.get("type") != "redirect"
+    ]
+    if non_redirect and all(
+        isinstance(p, dict) and p.get("type") == "assignment" for p in non_redirect
+    ):
+        return True
+    return False
