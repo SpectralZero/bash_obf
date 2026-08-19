@@ -61,18 +61,10 @@ class KnownDivergence:
 # names the real cause and the intended fix.  Grouped by ``root_cause`` so the
 # sweep reports a small number of underlying bugs rather than a scary run count.
 KNOWN: tuple[KnownDivergence, ...] = (
-    # ── opaque-const context-blindness (same family as the fixed $1 bug) ──
-    KnownDivergence(
-        case="arith_bases", mutation="*",
-        root_cause="opaque_const_context_blind",
-        reason=(
-            "opaque-const rewrites the digits of a base#number arithmetic literal: "
-            "$(( 16#ff )) becomes $(( ((20039)^20055)#ff )), an invalid base (must be "
-            "a literal 2-64). The base and its base-N digits are not plain integers. "
-            "Fix: opaque-const must not rewrite integers that form an N#... base "
-            "constant (same context-blindness class as the already-fixed $1 bug)."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── opaque-const context-blindness — FIXED (2026-08-19) ─────────────
+    # arith_bases: _INTEGER_RE now excludes digits adjacent to '#', so a base-N
+    # constant (16#ff, 2#1010, 8#17) keeps both its base and its digits.
+    # Locked by tests/test_faithfulness_regressions.py.
 
     # ── flow-obfusc / encode wrapping a state mutation — FIXED (2026-08-19) ──
     # arith_double_paren: flow-obfusc no longer subshell-wraps (( var=... ))

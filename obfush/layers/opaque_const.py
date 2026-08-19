@@ -9,11 +9,14 @@ from obfush.layers.base import Layer, LayerConfig, LayerStats
 
 
 # A digit run is an obfuscatable arithmetic literal only when it is NOT part of a
-# parameter expansion.  The leading ``(?<![A-Za-z0-9_$])`` rejects a preceding
-# ``$`` (so the positional parameter ``$1`` is never rewritten into ``$((1))``),
-# and ``(?<!\$\{)`` rejects ``${1}`` / ``${10}`` positional/brace expansions.
+# parameter expansion or a base-N constant.  ``(?<![A-Za-z0-9_$#])`` rejects a
+# preceding ``$`` (so ``$1`` is never rewritten), a preceding ``#`` (the digits of
+# a ``16#ff`` / ``2#1010`` base constant, and ``${var#5}`` prefix patterns), and
+# ``(?<!\$\{)`` rejects ``${1}`` / ``${10}``.  The trailing ``(?![A-Za-z0-9_#])``
+# rejects a following ``#`` (the *base* of a ``16#ff`` constant, which must stay a
+# literal 2-64).
 _INTEGER_RE = re.compile(
-    r"(?<![A-Za-z0-9_$])(?<!\$\{)(?P<value>-?(?:0|[1-9][0-9]*))(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_$#])(?<!\$\{)(?P<value>-?(?:0|[1-9][0-9]*))(?![A-Za-z0-9_#])"
 )
 _TEST_RE = re.compile(
     r"(?P<prefix>(?:^|\s)(?:-eq|-ne|-gt|-ge|-lt|-le)\s+)"

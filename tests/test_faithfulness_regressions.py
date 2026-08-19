@@ -383,3 +383,12 @@ def test_nested_quotes_in_command_substitution():
         "printf '%s\\n' \"$msg\"\n"
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_opaque_const_base_notation_preserved():
+    # base#value arithmetic literals (16#ff, 2#1010, 8#17) must survive
+    # opaque-const: neither the base nor the base-N digits may be rewritten.
+    src = "printf '%d %d %d\\n' \"$(( 16#ff ))\" \"$(( 2#1010 ))\" \"$(( 8#17 ))\"\n"
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["opaque-const"], intensity=1.0)
+    _assert_equivalent(src)
