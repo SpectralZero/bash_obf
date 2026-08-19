@@ -41,6 +41,7 @@ class KnownDivergence:
     reason: str                     # root-cause explanation + fix plan
     owner: str                      # who owns the fix
     since: str                      # ISO date the debt was recorded
+    priority: str = "medium"        # "high" | "medium" | "low" — fix-sequencing hint
     bash_max: tuple[int, ...] | None = None  # scope to bash <= this version
 
     def matches(self, case: str, mutation: str,
@@ -174,6 +175,31 @@ KNOWN: tuple[KnownDivergence, ...] = (
     # reads $? (the decode pipeline in eval "$(...|base64 -d)" reset it first) nor
     # a bare assignment.  Locked by tests/test_faithfulness_regressions.py.
 )
+
+
+# Inherent, low-priority limitations that are NOT ordinary fixture debt: they are
+# not corpus cases (so is_known / the sweep gate do not reference them) and cannot
+# be fixed without changing obfuscation semantics.  Documented here so they are
+# tracked and not rediscovered.  Consulted by humans, not the gate.
+KNOWN_LIMITATIONS: tuple[KnownDivergence, ...] = (
+    KnownDivergence(
+        case="procsub_output_flow_subshell", mutation="*",
+        root_cause="output_procsub_subshell_race",
+        reason=(
+            "An OUTPUT process substitution combined with `wait` -- e.g. "
+            "`printf ... > >(cat); wait` -- relies on the async writer being a child "
+            "of the top-level shell so the top-level `wait` can reap it.  When "
+            "flow-obfusc wraps the command in a subshell ( ( ... ) ), the writer "
+            "becomes a grandchild that the outer `wait` cannot reap, so its output "
+            "can race/be lost.  This is inherent to output process substitution + "
+            "job control and is NOT fixable without changing semantics (it would "
+            "require never subshell-wrapping any command containing `>(...)`, or "
+            "rewriting the wait topology).  Rare in practice; input process "
+            "substitution `<(...)` is unaffected.  Priority: low."
+        ),
+        owner="core-team", since="2026-08-19", priority="low"),
+)
+
 
 
 def is_known(case: str, mutation: str,

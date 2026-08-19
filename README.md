@@ -5,8 +5,8 @@
 ## Current Status
 
 - Version: `2.0.0-dev`
-- Tests: `949 passed, 1 Windows-only platform skip`
-- Coverage: `97.60%` combined statement and branch coverage
+- Tests: `1049 passed, 1 skipped` (adds an adversarial differential corpus + faithfulness regressions)
+- Coverage: `97.02%` combined statement and branch coverage
 - Lint: Ruff clean for `obfush`, `tests`, `scripts`, and `ci`
 - Distribution: internal source, wheel, sdist, and manually generated artifacts only
 - VM program: explicitly deferred in [FUTURE_WORK.md](FUTURE_WORK.md)
@@ -80,7 +80,7 @@ obfush --plugin ./trusted_layer.py input.sh output.sh
 
 ## Layers
 
-The current registry contains 11 layers:
+The current registry contains 12 layers:
 
 - `id-mangle`
 - `str-shred`
@@ -93,8 +93,9 @@ The current registry contains 11 layers:
 - `indirection`
 - `poly-shell`
 - `entropy-mask`
+- `anti-trace`
 
-The compatibility DAG enforces ordering constraints. `entropy-mask` runs last and preserves the script tail so injected decoys do not alter the final status. Unsupported Bash regions use an opaque fallback path and receive less AST-aware transformation.
+The compatibility DAG enforces ordering constraints. `entropy-mask` preserves the script tail so injected decoys do not alter the final status, and `anti-trace` injects an anti-analysis preamble and is ordered last. Unsupported Bash regions use an opaque fallback path and receive less AST-aware transformation.
 
 ## GUI API
 
