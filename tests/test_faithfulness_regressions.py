@@ -392,3 +392,11 @@ def test_opaque_const_base_notation_preserved():
     src = "printf '%d %d %d\\n' \"$(( 16#ff ))\" \"$(( 2#1010 ))\" \"$(( 8#17 ))\"\n"
     _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["opaque-const"], intensity=1.0)
     _assert_equivalent(src)
+
+
+@requires_bash
+def test_empty_quoted_test_operand_preserved():
+    # `test -z ""` must keep its empty operand: dropping it yields `test -z`
+    # (or `[[ -z ]]` after test-style morphing), a syntax error.
+    src = 'if test 3 -gt 2 && test -z ""; then printf \'ok\\n\'; fi\n'
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)

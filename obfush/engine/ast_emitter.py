@@ -112,6 +112,15 @@ def _emit_word(node: dict, depth: int) -> str:
         return raw_value
     value = node.get("value", "")
     if not value:
+        # An empty word is a real, arity-significant argument when it was quoted
+        # (e.g. `test -z ""` or `printf '%s' ""`).  Dropping it changes the
+        # command's argument count -> `test -z` is a syntax error.  Emit the empty
+        # quotes; only a truly unquoted-empty word collapses to nothing.
+        q = node.get("quoted")
+        if q == "double":
+            return '""'
+        if q == "single":
+            return "''"
         return ""
     # Literal text that contains '$' or '`' which the source escaped (\$, \`)
     # or otherwise made non-expanding (parser tagged it ``literal``).  Emit it

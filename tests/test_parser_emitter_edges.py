@@ -313,6 +313,19 @@ def test_escape_dq_body_preserves_command_sub_quotes():
     assert _escape_dq_body('$(a $(b "c") d)') == '$(a $(b "c") d)'
 
 
+def test_emitter_empty_quoted_word_is_preserved():
+    # An empty quoted word is arity-significant (e.g. `test -z ""`) and must not
+    # collapse to nothing; an unquoted-empty word still emits nothing.
+    def w(quoted):
+        node = {"type": "word", "value": ""}
+        if quoted:
+            node["quoted"] = quoted
+        return {"type": "script", "body": [node]}
+    assert emit(w("double")).strip() == '""'
+    assert emit(w("single")).strip() == "''"
+    assert emit(w(None)).strip() == ""
+
+
 def test_emitter_assignments_redirects_and_raw_nodes_defensively():
     ast = {
         "type": "script",

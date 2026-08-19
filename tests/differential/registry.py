@@ -136,16 +136,10 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── test -> [[ ]] conversion drops an empty operand ─────────────────
-    KnownDivergence(
-        case="test_builtin", mutation="*",
-        root_cause="test_empty_operand_dropped",
-        reason=(
-            "converting 'test -z \"\"' to [[ ]] drops the empty-string operand, "
-            "producing '[[ -z ]]' -- a syntax error (unary -z requires an operand). "
-            "Fix: preserve empty-string operands when rewriting test/[ ] into [[ ]]."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── test -> [[ ]] conversion drops an empty operand — FIXED (2026-08-19) ──
+    # test_builtin: the emitter dropped an empty QUOTED word ( `test -z ""` ->
+    # `test -z` ), losing the operand.  _emit_word now emits "" / '' for an empty
+    # quoted word.  Locked by tests/test_faithfulness_regressions.py.
 
     # ── encode/pipeline resets $? before it is read — FIXED (2026-08-19) ──
     # io_dollar_hash_status: the encode layer no longer eval-wraps a command that
