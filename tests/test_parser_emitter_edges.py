@@ -278,8 +278,8 @@ def test_emitter_quote_and_shell_syntax_defensive_paths():
         "$'ansi'": "$'ansi'",
         '$"locale"': '$"locale"',
         '"He"$\'llo\'"o"': '"He"$\'llo\'"o"',
-        "${name}": '"${name}"',
-        "$?": '"$?"',
+        "${name}": "${name}",
+        "$?": "$?",
         "$(printf ok)": "$(printf ok)",
         "`printf ok`": "`printf ok`",
         "[[ x == y ]]": "[[ x == y ]]",
@@ -301,6 +301,16 @@ def test_emitter_quote_and_shell_syntax_defensive_paths():
 
     assert emit({"type": "script", "body": [_word("raw syntax", raw=True)]}).strip() == "raw syntax"
     assert emit({"type": "script", "body": [{"type": "word"}]}).strip() == ""
+
+
+def test_escape_dq_body_preserves_command_sub_quotes():
+    from obfush.engine.ast_emitter import _escape_dq_body
+    # Literal " and \ at depth 0 are escaped for placement inside "...".
+    assert _escape_dq_body('a"b\\c') == 'a\\"b\\\\c'
+    # Quotes inside $(...) are NOT escaped (independent quoting context).
+    assert _escape_dq_body('x $(printf "%s" "$y") z') == 'x $(printf "%s" "$y") z'
+    # Nested command substitutions track depth correctly.
+    assert _escape_dq_body('$(a $(b "c") d)') == '$(a $(b "c") d)'
 
 
 def test_emitter_assignments_redirects_and_raw_nodes_defensively():

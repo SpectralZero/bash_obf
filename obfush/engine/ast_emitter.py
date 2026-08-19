@@ -155,14 +155,17 @@ def _shell_quote(value: str) -> str:
     if _is_quoted_concat(value):
         return value
 
-    # Single self-delimiting expansion: ${...} / $(...) / `...`
-    # Default to double-quoting variable expansions so the value is treated
-    # as one word (preserves intended-quoted bash semantics; bashlex strips
-    # the original quotes so we have to re-add a safe default).
+    # Bare parameter expansion:  ${...}  or  $var / $1 / $@ ...
+    # _shell_quote is reached ONLY for words the parser marked UNQUOTED (a
+    # double/single-quoted word is emitted by _emit_word before this point).  A
+    # bare expansion here was therefore genuinely unquoted in the source: emit it
+    # UNQUOTED to preserve intentional word-splitting/globbing (e.g. `set -- $s`).
+    # These early returns also stop the brace/glob chars below from forcing
+    # spurious quoting.
     if value.startswith("${") and value.endswith("}") and "}" not in value[2:-1]:
-        return f'"{value}"'
+        return value
     if re.fullmatch(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|[0-9]+|[?#*!$@-])", value):
-        return f'"{value}"'
+        return value
     # Command substitution: $(...)  or  `...`
     # Whether to quote depends on context (argument vs command position).
     # The parser sets a 'quoted' attribute when it detects the original source
@@ -195,12 +198,37 @@ def _shell_quote(value: str) -> str:
 
     has_expansion = "$" in value or "`" in value
     if has_expansion:
-        # Don't escape $ — preserve expansions. Escape `\` and `"` only.
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        # Don't escape $ — preserve expansions. Escape `\` and `"` only, and only
+        # OUTSIDE a command substitution (its quoting is an independent context).
+        return f'"{_escape_dq_body(value)}"'
     else:
         escaped = value.replace("'", "'\\''")
         return f"'{escaped}'"
+
+
+def _escape_dq_body(value: str) -> str:
+    r"""Escape ``\`` and ``"`` for placement inside ``"..."`` — but NOT inside a
+    ``$(...)`` command substitution, whose quoting is an independent context, so
+    ``"hello, $(printf '%s' "$name")!"`` keeps its inner quotes intact instead of
+    corrupting them to ``\"`` (which changes the parse).
+    """
+    out: list[str] = []
+    depth = 0                      # $( ... ) command-substitution nesting depth
+    i, n = 0, len(value)
+    while i < n:
+        if value[i:i + 2] == "$(":
+            depth += 1
+            out.append("$(")
+            i += 2
+            continue
+        c = value[i]
+        if c == ")" and depth > 0:
+            depth -= 1
+        elif depth == 0 and c in '\\"':
+            out.append("\\")
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _is_quoted_concat(value: str) -> bool:
@@ -358,7 +386,7 @@ def _emit_assignment(node: dict, depth: int) -> str:
                  or any(ord(ch) > 127 for ch in value))
         )
         if needs_quoting:
-            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+            escaped = _escape_dq_body(value)
             value = f'"{escaped}"'
     return f"{name}={value}"
 

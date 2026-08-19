@@ -355,3 +355,31 @@ def test_encode_dollar_question_preserved():
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["encode"], intensity=1.0)
     _assert_equivalent(src)
+
+
+# ── quoting metadata: preserve quoted/unquoted words through the emitter ──
+
+@requires_bash
+def test_unquoted_expansion_word_splits():
+    # `set -- $s` is UNQUOTED and must word-split; the emitter must not re-add
+    # quotes to a bare expansion the parser recorded as unquoted.
+    assert 'set -- "$s"' not in _emit_nolayer("set -- $s\n")
+    src = (
+        's="a b c"\n'
+        "set -- $s\n"
+        "printf '%d:%s\\n' \"$#\" \"$2\"\n"
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_nested_quotes_in_command_substitution():
+    # Double quotes inside $(...) inside a double-quoted string must NOT be
+    # escaped — the command substitution is an independent quoting context.
+    assert '\\"' not in _emit_nolayer("x=\"a $(printf '%s' \"$y\")b\"\n")
+    src = (
+        'name="the world"\n'
+        "msg=\"hello, $(printf '%s' \"$name\")!\"\n"
+        "printf '%s\\n' \"$msg\"\n"
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)

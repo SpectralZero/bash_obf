@@ -100,27 +100,12 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── quoting / word-split metadata ───────────────────────────────────
-    KnownDivergence(
-        case="quote_unquoted_splits", mutation="*",
-        root_cause="quoting_metadata",
-        reason=(
-            "an intentionally UNQUOTED expansion is re-emitted quoted: 'set -- $s' "
-            "becomes 'set -- \"$s\"', suppressing word-splitting, so $# is 1 instead of "
-            "3 and $2 is empty. Fix: preserve the quoted/unquoted metadata of a word "
-            "through the layer round-trip (never add quotes to an unquoted expansion)."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="combo_nested_quotes_cmdsub", mutation="*",
-        root_cause="quoting_metadata",
-        reason=(
-            "a double-quoted string with a nested command substitution that has its own "
-            "double quotes ( \"hello, $(printf '%s' \"$name\")!\" ) is mis-escaped by "
-            "str-shred/encode reconstruction, so 'the world' renders as '\"theworld\"'. "
-            "Fix: correct escaping of nested double quotes inside command substitutions."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── quoting / word-split metadata — FIXED (2026-08-19) ──────────────
+    # quote_unquoted_splits: _shell_quote no longer re-quotes a bare expansion the
+    #   parser recorded as UNQUOTED (so `set -- $s` keeps word-splitting).
+    # combo_nested_quotes_cmdsub: _escape_dq_body escapes " and \ only OUTSIDE a
+    #   $(...)/`...` command substitution, so nested cmdsub quotes survive.
+    # Both locked by tests/test_faithfulness_regressions.py.
 
     # ── positional parameters relocated into a function ─────────────────
     KnownDivergence(
