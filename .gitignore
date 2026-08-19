@@ -103,3 +103,6 @@ site/
 .claude/
 ci_output/
 debug_*.py
+
+# ─── Local planning notes (kept local, not part of the repo) ───────────
+implementation_plan.md
