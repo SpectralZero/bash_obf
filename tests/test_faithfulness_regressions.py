@@ -432,3 +432,30 @@ def test_name_positions_not_shredded():
         "sum 1 2 3 4 5\n"
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_positional_params_not_extracted_into_function():
+    # A command reading $*/$@/$#/$N must not be moved into a function by
+    # flow-obfusc: a function rebinds positional params, so "$*" would be empty.
+    # `set --` makes the script self-contained (no external argv needed).
+    src = (
+        "set -- alpha beta gamma delta\n"
+        "IFS=,\n"
+        "printf 'star=[%s]\\n' \"$*\"\n"
+        "printf 'count=%d\\n' \"$#\"\n"
+        "printf 'first=%s\\n' \"$1\"\n"
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["flow-obfusc"], intensity=1.0)
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_escaped_quote_in_double_quoted_word():
+    # An escaped inner quote in a double-quoted word must survive round-tripping:
+    # `"a\"b"` must emit `"a\"b"`, not `"a"b"` (which changes word boundaries).
+    assert '"a\\"b"' in _emit_nolayer('echo "a\\"b"\n')
+    _assert_equivalent(
+        "printf '%s\\n' \"say \\\"hi\\\" now\"\n",
+        seeds=LAYER_SEEDS, intensity=1.0,
+    )

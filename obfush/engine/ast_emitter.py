@@ -131,8 +131,11 @@ def _emit_word(node: dict, depth: int) -> str:
     # If the parser recorded the original quoting style, respect it.
     quoted = node.get("quoted")
     if quoted == "double":
-        # Re-wrap in double-quotes — preserves expansions, prevents splitting.
-        return '"' + value + '"'
+        # Re-wrap in double quotes.  Escape embedded " and \ (but not inside a
+        # $(...) command sub, whose quoting is independent) so an escaped inner
+        # quote survives round-tripping: `"a\"b"` must emit `"a\"b"`, not `"a"b"`.
+        # Real expansions ($var, ${...}, $(...)) are preserved.
+        return '"' + _escape_dq_body(value) + '"'
     elif quoted == "single":
         return "'" + value + "'"
     return _shell_quote(value)

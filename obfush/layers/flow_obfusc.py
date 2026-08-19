@@ -124,6 +124,12 @@ def _flow_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
 
 _VAR_REF_RE = re.compile(r'\$\{?!?#?([a-zA-Z_]\w*)')
 
+# Positional-parameter references: $@ $* $# $0..$9 ${@ ${* ${#} ${N ...
+# A command reading these must not be moved into a FUNCTION (a function has its
+# own positional parameters), though a subshell/opaque-predicate preserves them.
+# ${#} is the arg count; ${#name} (string length) is deliberately NOT matched.
+_POSITIONAL_RE = re.compile(r'\$(?:[@*#0-9]|\{[@*]|\{#\}|\{[0-9])')
+
 _BARRIER_COMMANDS = frozenset({
     "exit", "return", "break", "continue",
     "trap", "exec", "shift",
@@ -541,6 +547,34 @@ def _wrap_subshell(node: dict) -> dict:
     }
 
 
+def _references_positional_params(node: dict) -> bool:
+    """True if a command reads positional parameters ($@, $*, $#, $1..).
+
+    Extracting such a command into a function changes their meaning (a function
+    rebinds $@/$*/$#/$N to its own arguments), so it must not be extracted.
+    """
+    found = False
+
+    def _walk(n: dict) -> None:
+        nonlocal found
+        if found or not isinstance(n, dict):
+            return
+        value = n.get("value")
+        if isinstance(value, str) and _POSITIONAL_RE.search(value):
+            found = True
+            return
+        for key in ("parts", "body", "test_parts"):
+            val = n.get(key)
+            if isinstance(val, list):
+                for item in val:
+                    _walk(item)
+            elif isinstance(val, dict):
+                _walk(val)
+
+    _walk(node)
+    return found
+
+
 def _extract_functions(body: list[dict], rng: random.Random) -> list[dict]:
     """Extract random blocks into functions, then call them."""
     if len(body) < 4:
@@ -552,7 +586,8 @@ def _extract_functions(body: list[dict], rng: random.Random) -> list[dict]:
         if (isinstance(node, dict)
             and node.get("type") == "command"
             and not _has_variable_escape(node)
-            and not _mutates_shell_state(node))
+            and not _mutates_shell_state(node)
+            and not _references_positional_params(node))
     ]
 
     if not extractable:

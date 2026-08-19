@@ -92,28 +92,28 @@ KNOWN: tuple[KnownDivergence, ...] = (
     #   $(...)/`...` command substitution, so nested cmdsub quotes survive.
     # Both locked by tests/test_faithfulness_regressions.py.
 
-    # ── positional parameters relocated into a function ─────────────────
-    KnownDivergence(
-        case="io_star_vs_at", mutation="*",
-        root_cause="positional_params_scope",
-        reason=(
-            "junk-inject/flow relocates a command that reads $*/$@/$# into a FUNCTION "
-            "body; inside a function those are the function's own positional params, "
-            "not the script's, so \"$*\" expands empty. Fix: do not move commands "
-            "referencing $@/$*/$#/$N into a function body (or forward \"$@\")."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── positional parameters relocated into a function — FIXED (2026-08-19) ──
+    # io_star_vs_at: flow-obfusc's function extraction now skips commands that
+    # read $*/$@/$#/$N (a function rebinds positional params).  Subshell/opaque
+    # wrapping preserve them.  Locked by tests/test_faithfulness_regressions.py.
 
-    # ── indirection builds an invalid array subscript ───────────────────
+    # ── escaped $ / " fidelity inside a double-quoted eval string ───────
     KnownDivergence(
         case="combo_arith_array_indirect", mutation="*",
-        root_cause="indirection_array_subscript",
+        root_cause="eval_escaped_dollar_fidelity",
+        priority="low",
         reason=(
-            "indirection emits an invalid ${$var[idx]} form for an indirect array "
-            "reference (bad substitution) and renames the array inconsistently between "
-            "the eval'd indirect access and the direct ${data[idx]} access. Fix: do not "
-            "apply ${!ref}/${$var} indirection to array-subscript expansions; keep array "
-            "renames consistent across eval boundaries."
+            "MISLABELLED originally as an indirection/array bug; the differential "
+            "harness proved it is an emitter/parser ESCAPE-FIDELITY issue. The source "
+            "`eval \"...\\\"\\${$key[idx]}\\\"\"` uses backslash-escaped \\\" and \\$ to "
+            "defer the ${...} expansion until eval. The parser de-escapes \\\"->\" and "
+            "\\$->$ to the runtime form and DISCARDS which chars were escaped, so the "
+            "emitter cannot tell a literal $ (was \\$) from a real expansion ($key) and "
+            "re-emits `${$key[idx]}` (bad substitution). The safe half is fixed "
+            "(_emit_word/_escape_dq_body now re-escape literal \"), but the \\$-before-"
+            "expansion case needs escape-POSITION tracking threaded parser->layers->"
+            "emitter (a structured double-quoted-string representation). Deferred as a "
+            "larger, higher-risk refactor; rare idiom (deferred indirect-array via eval)."
         ),
         owner="core-team", since="2026-08-19"),
 

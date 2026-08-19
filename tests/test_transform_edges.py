@@ -684,3 +684,33 @@ def test_encode_unknown_mode_leaves_command_unchanged():
         eval_mode = "unknown"
 
     assert encode._encode_command(command, InvalidConfig(), LayerStats()) is command
+
+
+def test_references_positional_params_detection():
+    # Positional references -> True (covers the found=True return path).
+    for val in ("$*", "$@", "$#", "$1", "${@}", "${*}", "${#}", "${10}"):
+        node = {"type": "command", "parts": [{"type": "word", "value": val}]}
+        assert flow._references_positional_params(node) is True
+    # Nested inside list and dict children (both recursion branches).
+    nested = {
+        "type": "compound",
+        "body": [
+            {"type": "command", "parts": [{"type": "word", "value": "safe"}]},
+            {"type": "word", "value": "$@"},
+        ],
+    }
+    assert flow._references_positional_params(nested) is True
+    assert flow._references_positional_params(
+        {"type": "x", "test_parts": {"type": "word", "value": "$1"}}) is True
+    # A non-dict child with nothing found -> exercises the `not isinstance` guard.
+    assert flow._references_positional_params(
+        {"type": "x", "parts": ["not-a-dict", {"type": "word", "value": "plain"}]}) is False
+    # Positional found early, with a later item -> exercises the `if found` short-circuit.
+    assert flow._references_positional_params(
+        {"type": "x", "parts": [{"type": "word", "value": "$@"},
+                                {"type": "word", "value": "later"}]}) is True
+    # Named vars, string length ${#name}, and indirect ${!ref} are NOT positional.
+    for val in ("$foo", "${bar}", "${#name}", "${!ref}", "plain"):
+        node = {"type": "command", "parts": [{"type": "word", "value": val}]}
+        assert flow._references_positional_params(node) is False
+    assert flow._references_positional_params({"type": "x"}) is False
