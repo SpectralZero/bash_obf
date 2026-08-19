@@ -270,3 +270,46 @@ def test_process_substitution_mapfile_array():
         "printf 'n=%d mid=%s\\n' \"${#lines[@]}\" \"${lines[1]}\"\n",
         seeds=LAYER_SEEDS, intensity=1.0,
     )
+
+
+# ── id-mangle: reference sites the rename must not miss ──────────────────
+# id-mangle renames a defined variable but must also rewrite every place the
+# variable is *referenced*, and must not rename variables it cannot rewrite.
+
+@requires_bash
+def test_id_mangle_arithmetic_array_subscript():
+    # The index variable inside ${arr[i+1]} is an arithmetic reference and must
+    # be renamed consistently with its assignment (was left as unset `i`).
+    src = (
+        "arr=(10 20 30 40)\n"
+        "i=2\n"
+        'printf "%s\\n" "${arr[i+1]}"\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["id-mangle"], intensity=1.0)
+    _assert_equivalent(src)
+
+
+@requires_bash
+def test_id_mangle_unquoted_heredoc_body():
+    # An UNQUOTED heredoc expands its body, so $msg there must be renamed too
+    # (was left as $msg -> expanded empty after the assignment was renamed).
+    src = (
+        "msg=world\n"
+        "cat <<EOF\n"
+        "hello $msg\n"
+        "EOF\n"
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["id-mangle"], intensity=1.0)
+    _assert_equivalent(src)
+
+
+@requires_bash
+def test_id_mangle_prefix_expansion_excluded():
+    # ${!zz_@} enumerates variables by prefix at runtime; those variables must
+    # NOT be renamed (the prefix cannot be rewritten to match random names).
+    src = (
+        "zz_a=1; zz_b=2; zz_c=3\n"
+        'printf "%s\\n" "${!zz_@}"\n'
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["id-mangle"], intensity=1.0)
+    _assert_equivalent(src)

@@ -120,6 +120,18 @@ _ASSIGN_INDIRECT_RE = re.compile(
     r'|([a-zA-Z_]\w*))'
     r'(?=[\s;&|\n)"\']|$)'
 )
+# Indirect PREFIX enumeration:  ${!prefix@}  ${!prefix*}
+# bash enumerates every *currently defined* variable sharing ``prefix`` at
+# RUNTIME, so the prefix cannot be rewritten to match randomly-renamed
+# variables.  Any variable whose name starts with such a prefix must therefore
+# be EXCLUDED from renaming (correctness over strength).
+_PREFIX_EXPANSION_RE = re.compile(r'\$\{!([a-zA-Z_]\w*)[@*]\}')
+# Array subscript inside a parameter expansion:  ${name[SUBSCRIPT]}
+# For an indexed array the subscript is an arithmetic context, so identifier
+# references inside it (e.g. ``${arr[i+1]}``) must be renamed too.  Only names
+# present in the mangle map are rewritten, so literal associative-array keys
+# (which are not defined variables) are left untouched.
+_ARRAY_SUBSCRIPT_RE = re.compile(r'(\$\{[!#]?[a-zA-Z_]\w*\[)([^]]+)(\])')
 
 
 def _collect_identifiers_from_text(text: str) -> set[str]:
@@ -155,6 +167,11 @@ def _collect_identifiers_from_text(text: str) -> set[str]:
         if name and _is_mangleable(name):
             found.add(name)
 
+    # Exclude variables enumerated by an indirect prefix expansion
+    # ${!pre@}/${!pre*}: renaming them would break the runtime enumeration.
+    prefixes = {m.group(1) for m in _PREFIX_EXPANSION_RE.finditer(text)}
+    found = {n for n in found if not any(n.startswith(p) for p in prefixes)}
+
     return found
 
 
@@ -179,6 +196,7 @@ def _collect_identifiers(ast: dict) -> set[str]:
 
     defined: set[str] = set()
     referenced: set[str] = set()
+    prefixes: set[str] = set()
 
     def _walk(node: dict) -> None:
         if not isinstance(node, dict):
@@ -219,6 +237,13 @@ def _collect_identifiers(ast: dict) -> set[str]:
             if _is_mangleable(ref):
                 referenced.add(ref)
 
+        # Indirect prefix expansion ${!pre@}/${!pre*} in any word value: the
+        # enumerated variables must not be renamed (see _PREFIX_EXPANSION_RE).
+        val = node.get("value")
+        if isinstance(val, str) and "${!" in val:
+            for m in _PREFIX_EXPANSION_RE.finditer(val):
+                prefixes.add(m.group(1))
+
         # Recurse into all child containers
         for key in ("parts", "body", "test_parts", "redirects", "heredoc"):
             val = node.get(key)
@@ -233,6 +258,8 @@ def _collect_identifiers(ast: dict) -> set[str]:
             _walk(node["target"])
 
     _walk(ast)
+    # Exclude variables enumerated by ${!pre@}/${!pre*} (cannot be safely renamed).
+    defined = {n for n in defined if not any(n.startswith(p) for p in prefixes)}
     return defined
 
 
@@ -475,6 +502,15 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
             return f"(({_mangle_arith_inner(m.group(1))}))"
         s = arith_cmd_pattern.sub(_arith_cmd_repl, s)
 
+        # 3b. Array subscript inside ${name[SUBSCRIPT]} — for an indexed array the
+        #     subscript is arithmetic, so mapped identifiers inside it must be
+        #     renamed (e.g. ${arr[i+1]} where i was renamed by its assignment).
+        #     _mangle_arith_inner only rewrites names present in mangle_map, so
+        #     literal associative-array keys are left alone.
+        def _subscript_repl(m: re.Match) -> str:
+            return m.group(1) + _mangle_arith_inner(m.group(2)) + m.group(3)
+        s = _ARRAY_SUBSCRIPT_RE.sub(_subscript_repl, s)
+
         # 4. Parameter expansion: $name and ${...name...}
         def _param_repl(m: re.Match) -> str:
             name = m.group(1) or m.group(2)
@@ -565,6 +601,19 @@ def _apply_mangle_map(ast: dict, mangle_map: dict[str, str]) -> dict:
                 node["value"] = mangle_map[value]
             if "var_name" in node and node["var_name"] in mangle_map:
                 node["var_name"] = mangle_map[node["var_name"]]
+
+        # Heredoc body: an UNQUOTED delimiter (<<EOF) expands the body, so any
+        # $var / ${...} / $((...)) references there must be renamed too.  A quoted
+        # delimiter (<<'EOF') suppresses expansion, but those fail bashlex and
+        # arrive as an opaque blob — so a structured heredoc node is always the
+        # unquoted form.  We still guard on quote/backslash chars for safety and
+        # rename in "double" context (expansions only, never statement patterns).
+        if node.get("type") == "heredoc":
+            body = node.get("body")
+            delim = node.get("delimiter", "") or ""
+            if (isinstance(body, str) and body
+                    and not (set(delim) & set("'\"\\"))):
+                node["body"] = _mangle_string(body, context="double")
 
         # Recurse into all child containers
         for key in ("parts", "body", "test_parts", "redirects", "heredoc"):

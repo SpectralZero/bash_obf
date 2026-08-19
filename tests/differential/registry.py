@@ -97,39 +97,11 @@ KNOWN: tuple[KnownDivergence, ...] = (
         ),
         owner="core-team", since="2026-08-19"),
 
-    # ── id-mangle: rename misses a reference site ───────────────────────
-    KnownDivergence(
-        case="heredoc_expand", mutation="*",
-        root_cause="id_mangle_incomplete_refs",
-        reason=(
-            "id-mangle renames a variable (name -> _x) in its assignment but does not "
-            "rewrite the $name reference inside an UNQUOTED heredoc body, so it expands "
-            "empty. Fix: rewrite references inside unquoted heredoc bodies (or exclude "
-            "such identifiers from the rename set). This is the expansion-metadata work."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="expand_arithmetic_index", mutation="*",
-        root_cause="id_mangle_incomplete_refs",
-        reason=(
-            "id-mangle renames the index variable i -> _sum8 in its assignment but does "
-            "not rewrite the reference to i inside the arithmetic array subscript "
-            "${arr[i+1]}, so it uses an unset i (index 0+1) and reads the wrong element "
-            "(20 instead of 40). Fix: rewrite identifier references inside arithmetic "
-            "array subscripts."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="expand_prefix_names", mutation="*",
-        root_cause="id_mangle_incomplete_refs",
-        reason=(
-            "id-mangle renames zz_a/zz_b/zz_c to _k67/_sum8/_f5q, but the indirect "
-            "prefix expansion ${!zz_@} enumerates variables by the 'zz_' prefix; after "
-            "renaming, nothing matches, so it expands empty. Fix: do not rename "
-            "variables enumerated by a ${!prefix@}/${!prefix*} expansion (or preserve "
-            "the shared prefix)."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── id-mangle: rename misses a reference site — FIXED (2026-08-19) ───
+    # heredoc_expand / expand_arithmetic_index / expand_prefix_names: id-mangle
+    # now rewrites references inside unquoted heredoc bodies and arithmetic array
+    # subscripts, and EXCLUDES variables enumerated by a ${!prefix@}/${!prefix*}
+    # expansion from renaming.  Locked by tests/test_faithfulness_regressions.py.
 
     # ── name positions must stay bare identifiers ───────────────────────
     KnownDivergence(
