@@ -165,6 +165,45 @@ def _shred_with_format_specs(value: str, config: LayerConfig) -> str:
     return "".join(parts)
 
 
+# Builtins whose bare word arguments are variable NAMES (must stay identifiers).
+_NAME_KEYWORDS = frozenset({
+    "local", "declare", "typeset", "readonly", "export", "read",
+})
+
+
+def _mark_name_positions(node: dict) -> None:
+    """Flag words that occupy a NAME position so they are never shredded.
+
+    Covers the ``for VAR in ...`` loop variable and the bare name arguments to
+    declaration/read builtins (``local n``, ``declare x``, ``read a b``).  Values
+    (``name=value``) and flags (``-i``) are left shreddable.
+    """
+    parts = node.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return
+
+    # for VAR in ... : the word right after the `for` keyword is the loop var.
+    if node.get("type") == "compound" and node.get("kind") == "for":
+        for i, p in enumerate(parts):
+            if (isinstance(p, dict) and p.get("type") == "word"
+                    and p.get("value") == "for"):
+                nxt = parts[i + 1] if i + 1 < len(parts) else None
+                if (isinstance(nxt, dict) and nxt.get("type") == "word"
+                        and not str(nxt.get("value", "")).startswith("((")):
+                    nxt["_no_shred"] = True
+                break
+
+    # local/declare/... NAME : bare word args (not flags, not name=value) are names.
+    first = parts[0]
+    if (isinstance(first, dict) and first.get("type") == "word"
+            and first.get("value") in _NAME_KEYWORDS):
+        for p in parts[1:]:
+            if isinstance(p, dict) and p.get("type") == "word":
+                val = str(p.get("value", ""))
+                if val and not val.startswith("-"):
+                    p["_no_shred"] = True
+
+
 def _shred_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
     """Walk the AST and shred string literals."""
     if not isinstance(ast, dict):
@@ -172,8 +211,14 @@ def _shred_walk(ast: dict, config: LayerConfig, stats: LayerStats) -> dict:
 
     node_type = ast.get("type", "")
 
+    # Protect NAME positions: a for-loop variable and the bare name arguments to
+    # declaration builtins must stay bare identifiers.  Shredding them into
+    # $'...'/"$(...)" yields `for $'_k67' in` / `local "$(...)"`, which bash
+    # rejects with "not a valid identifier".  Mark them before the word branch.
+    _mark_name_positions(ast)
+
     # Shred word values
-    if node_type == "word" and not ast.get("parts"):
+    if node_type == "word" and not ast.get("parts") and not ast.get("_no_shred"):
         value = ast.get("value", "")
         if _should_shred(value, ast):
             result = _shred_value(value, config)

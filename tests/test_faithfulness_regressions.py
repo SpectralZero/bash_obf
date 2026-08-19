@@ -416,3 +416,19 @@ def test_heredoc_non_eof_delimiter_preserved():
     # default to EOF (which left the delimiter line inside the body).
     src = "cat <<END\nhello\nEND\n"
     _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_name_positions_not_shredded():
+    # A for-loop variable and local NAMES must stay bare identifiers even after
+    # id-mangle renames them; str-shred must not shred a name position into
+    # $'...'/"$(...)" (which bash rejects as "not a valid identifier").
+    src = (
+        "sum() {\n"
+        "    local total=0 n\n"
+        '    for n in "$@"; do (( total += n )); done\n'
+        "    printf '%d\\n' \"$total\"\n"
+        "}\n"
+        "sum 1 2 3 4 5\n"
+    )
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)

@@ -79,18 +79,11 @@ KNOWN: tuple[KnownDivergence, ...] = (
     # subscripts, and EXCLUDES variables enumerated by a ${!prefix@}/${!prefix*}
     # expansion from renaming.  Locked by tests/test_faithfulness_regressions.py.
 
-    # ── name positions must stay bare identifiers ───────────────────────
-    KnownDivergence(
-        case="combo_func_local_arith_loop", mutation="*",
-        root_cause="name_position_mangled",
-        reason=(
-            "id-mangle/encode rewrites a NAME position into a quoted/encoded form: the "
-            "for-loop variable becomes `for $'_k67' in ...` and the `local` name is "
-            "base64-decoded -- both invalid ('_k67': not a valid identifier). Fix: never "
-            "quote/encode identifiers in name positions (for VAR, local/declare NAME, "
-            "read VAR)."
-        ),
-        owner="core-team", since="2026-08-19"),
+    # ── name positions must stay bare identifiers — FIXED (2026-08-19) ──
+    # combo_func_local_arith_loop: str-shred now marks and skips NAME positions
+    # (for-loop variable, local/declare/readonly/export/typeset/read names), so a
+    # renamed identifier is not shredded into $'...'/"$(...)".  Locked by
+    # tests/test_faithfulness_regressions.py.
 
     # ── quoting / word-split metadata — FIXED (2026-08-19) ──────────────
     # quote_unquoted_splits: _shell_quote no longer re-quotes a bare expansion the
