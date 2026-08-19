@@ -173,6 +173,13 @@ def _shell_quote(value: str) -> str:
        (value.startswith("`") and value.endswith("`")):
         return value
 
+    # Process substitution:  <(...)  or  >(...)
+    # These are self-delimiting shell CONSTRUCTS, not filenames or literals.
+    # Quoting or string-encoding them turns them into a literal path such as
+    # '<(printf ...)' which bash then fails to open.  Emit verbatim.
+    if (value.startswith("<(") or value.startswith(">(")) and value.endswith(")"):
+        return value
+
     # Words that are pre-rendered shell syntax — leave them verbatim.
     # Detected when the value contains any of these patterns that wouldn't
     # appear in a "literal string the user wrote in quotes".
@@ -627,7 +634,12 @@ def _emit_redirect(node: dict, depth: int) -> str:
         return f"{fd_str}<<{delim}\n{body}\n{delim}"
 
     fd_str = f"{fd}" if fd is not None else ""
-    return f"{fd_str}{rtype}{target}"
+    # A process-substitution operand (<(...) / >(...)) must be separated from the
+    # redirection operator by whitespace:  `< <(cmd)`,  `> >(cmd)`.  Concatenated,
+    # the tokens merge into `<<(` / `>>(`, which bash parses as a heredoc / append
+    # operator followed by `(` -- a syntax error, not a redirect-from-process-sub.
+    sep = " " if isinstance(target, str) and target[:2] in ("<(", ">(") else ""
+    return f"{fd_str}{rtype}{sep}{target}"
 
 
 def _emit_heredoc(node: dict, depth: int) -> str:

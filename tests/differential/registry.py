@@ -1,21 +1,31 @@
 """Known-divergence registry — the auditable "expected failing" list.
 
 This is the single source of truth for original-vs-obfuscated divergences that
-are *accepted for now*, each with an explicit root-cause reason and an owner.
+are *accepted for now*, each with an explicit root-cause label, reason and owner.
 It is consumed by the differential pytest suite (as tolerant xfail) and by
 ``ci/differential_sweep.py`` (which separates *registered* from *unregistered*
-divergences), so the two never drift.
+divergences and groups registered ones by ``root_cause``), so the two never drift.
 
 Policy
 ------
 * An entry is a **debt marker**, not a silencer: it must name the real cause and
   a plan, never "flaky" or "TODO".
+* ``root_cause`` is a short, stable label; several cases may share one when they
+  have the *same* underlying bug (so the sweep reports N root causes, not N
+  fixtures — the "make the number unambiguous" rule).
 * Prefer fixing the root cause.  Register only when a fix is deferred deliberately
   (e.g. it needs the quoting/expansion-metadata work, or a specific bash version).
 * ``bash_max`` optionally scopes an entry to bash versions ``<= bash_max`` (for
   version-specific quirks surfaced by the multi-bash matrix).
 * The sweep reports registered entries that no longer reproduce so the list can
   be pruned; accidental fixes should not silently rot the registry.
+
+Recently pruned (fixed at the root, now covered by regression tests):
+* ``procsub_input`` / ``combo_procsub_array_mapfile`` — process substitution as a
+  command argument was quoted into a literal filename (_shell_quote), and a
+  process-sub redirect operand collapsed ``< <(`` into ``<<(``.  Both emitter
+  bugs are fixed; see tests/test_faithfulness_regressions.py.
+* opaque-const corrupting ``$1`` — fixed earlier, likewise absent here.
 """
 
 from __future__ import annotations
@@ -27,7 +37,8 @@ from dataclasses import dataclass
 class KnownDivergence:
     case: str                       # corpus case name or fixture filename
     mutation: str                   # mutation name, or "*" for any
-    reason: str                     # root-cause explanation
+    root_cause: str                 # short stable label; groups cases by shared cause
+    reason: str                     # root-cause explanation + fix plan
     owner: str                      # who owns the fix
     since: str                      # ISO date the debt was recorded
     bash_max: tuple[int, ...] | None = None  # scope to bash <= this version
@@ -44,55 +55,175 @@ class KnownDivergence:
         return True
 
 
-# Divergences surfaced by the adversarial sweep whose root-cause fixes are being
-# sequenced deliberately (fix carefully, do not force).  Each names the real
-# cause and the intended fix.  ``opaque-const`` corrupting ``$1`` was already
-# fixed (see tests/test_faithfulness_regressions.py) and is intentionally absent.
+# Divergences surfaced by the adversarial FULL-corpus sweep whose root-cause
+# fixes are being sequenced deliberately (fix carefully, do not force).  Each
+# names the real cause and the intended fix.  Grouped by ``root_cause`` so the
+# sweep reports a small number of underlying bugs rather than a scary run count.
 KNOWN: tuple[KnownDivergence, ...] = (
+    # ── opaque-const context-blindness (same family as the fixed $1 bug) ──
     KnownDivergence(
-        case="procsub_input", mutation="*",
+        case="arith_bases", mutation="*",
+        root_cause="opaque_const_context_blind",
         reason=(
-            "process substitution <(...) is captured as a redirect-target word and "
-            "single-quoted into a literal filename ( } <'<(printf ...)' ), so the "
-            "loop reads a non-existent file. Fix: recognise <(...)/>(...) in the "
-            "parser and emit them verbatim (raw, never quoted)."
+            "opaque-const rewrites the digits of a base#number arithmetic literal: "
+            "$(( 16#ff )) becomes $(( ((20039)^20055)#ff )), an invalid base (must be "
+            "a literal 2-64). The base and its base-N digits are not plain integers. "
+            "Fix: opaque-const must not rewrite integers that form an N#... base "
+            "constant (same context-blindness class as the already-fixed $1 bug)."
         ),
         owner="core-team", since="2026-08-19"),
+
+    # ── flow-obfusc wrapping a state-mutating command ───────────────────
     KnownDivergence(
-        case="combo_procsub_array_mapfile", mutation="*",
+        case="arith_double_paren", mutation="*",
+        root_cause="flow_wrap_state_mutation",
         reason=(
-            "same root cause as procsub_input: mapfile < <(...) has its process "
-            "substitution emitted as a quoted literal filename, so the array is empty."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="heredoc_expand", mutation="*",
-        reason=(
-            "id-mangle renames a variable (name -> _x) in its assignment but does not "
-            "rewrite the $name reference inside the UNQUOTED heredoc body, so it "
-            "expands to empty. Fix: exclude from the rename set any identifier "
-            "referenced in a heredoc body (or rewrite refs inside unquoted bodies). "
-            "This is the quoting/expansion-metadata work."
-        ),
-        owner="core-team", since="2026-08-19"),
-    KnownDivergence(
-        case="io_dollar_hash_status", mutation="*",
-        reason=(
-            "encode/str-shred wraps commands as eval \"$(...|base64 -d)\"; the "
-            "command-substitution pipeline resets $? before an encoded 'x=$?' reads "
-            "it, so the captured status is 0 instead of the prior command's. Fix: "
-            "never encode/shred a command whose text references $?. (Masked under "
-            "set -e, where both variants abort at the prior command.)"
+            "flow-obfusc wraps a bare (( y = ... )) arithmetic ASSIGNMENT in a subshell "
+            "( ( ... ) ), so the assignment to y is confined to the subshell and lost; "
+            "the later \"$y\" reads empty (0, or unbound under set -u). Fix: flow-obfusc "
+            "must not subshell-wrap commands that mutate shell state (bare assignments, "
+            "(( var=... )), set/shift/readonly/export)."
         ),
         owner="core-team", since="2026-08-19"),
     KnownDivergence(
         case="scope_readonly", mutation="*",
+        root_cause="flow_wrap_state_mutation",
         reason=(
             "flow-obfusc wraps the bare assignment 'r=changed' in "
             "'if TRUE; then r=changed; fi || ...', changing exit-status propagation of "
-            "the readonly-assignment failure (the || fires and set -e no longer "
-            "aborts). Fix: do not compound-wrap bare assignments; treat a failed "
-            "assignment like the set/shift shell-state commands already excluded."
+            "the readonly-assignment failure (the || fires and set -e no longer aborts). "
+            "Fix: same as flow_wrap_state_mutation -- do not compound-wrap bare "
+            "assignments / state-mutating commands (treat like the set/shift exclusions)."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── id-mangle: rename misses a reference site ───────────────────────
+    KnownDivergence(
+        case="heredoc_expand", mutation="*",
+        root_cause="id_mangle_incomplete_refs",
+        reason=(
+            "id-mangle renames a variable (name -> _x) in its assignment but does not "
+            "rewrite the $name reference inside an UNQUOTED heredoc body, so it expands "
+            "empty. Fix: rewrite references inside unquoted heredoc bodies (or exclude "
+            "such identifiers from the rename set). This is the expansion-metadata work."
+        ),
+        owner="core-team", since="2026-08-19"),
+    KnownDivergence(
+        case="expand_arithmetic_index", mutation="*",
+        root_cause="id_mangle_incomplete_refs",
+        reason=(
+            "id-mangle renames the index variable i -> _sum8 in its assignment but does "
+            "not rewrite the reference to i inside the arithmetic array subscript "
+            "${arr[i+1]}, so it uses an unset i (index 0+1) and reads the wrong element "
+            "(20 instead of 40). Fix: rewrite identifier references inside arithmetic "
+            "array subscripts."
+        ),
+        owner="core-team", since="2026-08-19"),
+    KnownDivergence(
+        case="expand_prefix_names", mutation="*",
+        root_cause="id_mangle_incomplete_refs",
+        reason=(
+            "id-mangle renames zz_a/zz_b/zz_c to _k67/_sum8/_f5q, but the indirect "
+            "prefix expansion ${!zz_@} enumerates variables by the 'zz_' prefix; after "
+            "renaming, nothing matches, so it expands empty. Fix: do not rename "
+            "variables enumerated by a ${!prefix@}/${!prefix*} expansion (or preserve "
+            "the shared prefix)."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── name positions must stay bare identifiers ───────────────────────
+    KnownDivergence(
+        case="combo_func_local_arith_loop", mutation="*",
+        root_cause="name_position_mangled",
+        reason=(
+            "id-mangle/encode rewrites a NAME position into a quoted/encoded form: the "
+            "for-loop variable becomes `for $'_k67' in ...` and the `local` name is "
+            "base64-decoded -- both invalid ('_k67': not a valid identifier). Fix: never "
+            "quote/encode identifiers in name positions (for VAR, local/declare NAME, "
+            "read VAR)."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── quoting / word-split metadata ───────────────────────────────────
+    KnownDivergence(
+        case="quote_unquoted_splits", mutation="*",
+        root_cause="quoting_metadata",
+        reason=(
+            "an intentionally UNQUOTED expansion is re-emitted quoted: 'set -- $s' "
+            "becomes 'set -- \"$s\"', suppressing word-splitting, so $# is 1 instead of "
+            "3 and $2 is empty. Fix: preserve the quoted/unquoted metadata of a word "
+            "through the layer round-trip (never add quotes to an unquoted expansion)."
+        ),
+        owner="core-team", since="2026-08-19"),
+    KnownDivergence(
+        case="combo_nested_quotes_cmdsub", mutation="*",
+        root_cause="quoting_metadata",
+        reason=(
+            "a double-quoted string with a nested command substitution that has its own "
+            "double quotes ( \"hello, $(printf '%s' \"$name\")!\" ) is mis-escaped by "
+            "str-shred/encode reconstruction, so 'the world' renders as '\"theworld\"'. "
+            "Fix: correct escaping of nested double quotes inside command substitutions."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── positional parameters relocated into a function ─────────────────
+    KnownDivergence(
+        case="io_star_vs_at", mutation="*",
+        root_cause="positional_params_scope",
+        reason=(
+            "junk-inject/flow relocates a command that reads $*/$@/$# into a FUNCTION "
+            "body; inside a function those are the function's own positional params, "
+            "not the script's, so \"$*\" expands empty. Fix: do not move commands "
+            "referencing $@/$*/$#/$N into a function body (or forward \"$@\")."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── indirection builds an invalid array subscript ───────────────────
+    KnownDivergence(
+        case="combo_arith_array_indirect", mutation="*",
+        root_cause="indirection_array_subscript",
+        reason=(
+            "indirection emits an invalid ${$var[idx]} form for an indirect array "
+            "reference (bad substitution) and renames the array inconsistently between "
+            "the eval'd indirect access and the direct ${data[idx]} access. Fix: do not "
+            "apply ${!ref}/${$var} indirection to array-subscript expansions; keep array "
+            "renames consistent across eval boundaries."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── emitter: two heredocs on one command line ───────────────────────
+    KnownDivergence(
+        case="heredoc_two_adjacent", mutation="*",
+        root_cause="heredoc_multiple_per_line",
+        reason=(
+            "for two heredocs on one line ('cat <<A; cat <<B'), the emitter lets the "
+            "first heredoc body absorb the following line(s) (body becomes 'first\\nA' "
+            "instead of 'first'), corrupting both outputs. Fix: emit multiple heredoc "
+            "bodies for one command line in order, each terminated at its own delimiter."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── test -> [[ ]] conversion drops an empty operand ─────────────────
+    KnownDivergence(
+        case="test_builtin", mutation="*",
+        root_cause="test_empty_operand_dropped",
+        reason=(
+            "converting 'test -z \"\"' to [[ ]] drops the empty-string operand, "
+            "producing '[[ -z ]]' -- a syntax error (unary -z requires an operand). "
+            "Fix: preserve empty-string operands when rewriting test/[ ] into [[ ]]."
+        ),
+        owner="core-team", since="2026-08-19"),
+
+    # ── encode/pipeline resets $? before it is read ─────────────────────
+    KnownDivergence(
+        case="io_dollar_hash_status", mutation="*",
+        root_cause="exit_status_clobber",
+        reason=(
+            "encode/str-shred wraps commands as eval \"$(...|base64 -d)\"; the "
+            "command-substitution pipeline resets $? before an encoded 'x=$?' reads it, "
+            "so the captured status is 0 instead of the prior command's. Fix: never "
+            "encode/shred a command whose text references $?. (Masked under set -e, "
+            "where both variants abort at the prior command.)"
         ),
         owner="core-team", since="2026-08-19"),
 )
@@ -105,3 +236,19 @@ def is_known(case: str, mutation: str,
         if entry.matches(case, mutation, bash_version):
             return entry
     return None
+
+
+def root_cause_index() -> dict[str, list[str]]:
+    """Map each ``root_cause`` label to the sorted list of cases that share it.
+
+    Lets the sweep and reports collapse many failing (case, mutation, seed) runs
+    into the small number of *distinct underlying bugs* they actually represent.
+    """
+    index: dict[str, list[str]] = {}
+    for entry in KNOWN:
+        cases = index.setdefault(entry.root_cause, [])
+        if entry.case not in cases:
+            cases.append(entry.case)
+    for cases in index.values():
+        cases.sort()
+    return index

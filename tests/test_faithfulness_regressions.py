@@ -208,3 +208,65 @@ def test_brace_positional_param_not_constified():
     )
     _assert_equivalent(src, seeds=LAYER_SEEDS, layers=["opaque-const"], intensity=1.0)
     _assert_equivalent(src)
+
+
+# ── process substitution: never quoted; redirect operand keeps its space ──
+# Two distinct emitter bugs are locked here:
+#   1. `<(...)`/`>(...)` as a command argument was single-quoted into a literal
+#      filename ('<(...)') by _shell_quote.
+#   2. `< <(...)` / `> >(...)` collapsed the operator-operand space into `<<(` /
+#      `>>(`, which bash misparses as a heredoc / append operator.
+
+def _emit_nolayer(src: str) -> str:
+    return emit(parse_bash(src))
+
+
+@requires_bash
+def test_process_substitution_not_quoted():
+    # A process substitution used as a command argument must be emitted verbatim
+    # (never quoted into the literal path '<(...)').
+    emitted = _emit_nolayer("cat <(echo hello)\n")
+    assert "<(echo" in emitted
+    assert "'<(" not in emitted and '"<(' not in emitted
+    _assert_equivalent("cat <(echo hello)\n", seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_process_substitution_with_redirection():
+    # diff <(...) <(...): two argument process substitutions in one command.
+    _assert_equivalent(
+        "diff <(printf '1\\n2\\n') <(printf '1\\n2\\n') && echo SAME\n",
+        seeds=LAYER_SEEDS, intensity=1.0,
+    )
+
+
+@requires_bash
+def test_process_substitution_redirect_operand_keeps_space():
+    # `done < <(...)` must NOT collapse into `<<(` (a heredoc): the whitespace
+    # between the redirection operator and the process substitution is required.
+    src = (
+        "while read -r l; do printf 'got:%s\\n' \"$l\"; done "
+        "< <(printf 'x\\ny\\nz\\n')\n"
+    )
+    emitted = _emit_nolayer(src)
+    assert "<<(" not in emitted
+    assert "< <(" in emitted
+    _assert_equivalent(src, seeds=LAYER_SEEDS, intensity=1.0)
+
+
+@requires_bash
+def test_process_substitution_output_redirect_keeps_space():
+    # `> >(...)` must not collapse into `>>(` (append operator followed by `(`).
+    emitted = _emit_nolayer("printf 'hi\\n' > >(cat)\n")
+    assert ">>(" not in emitted
+    assert "> >(" in emitted
+
+
+@requires_bash
+def test_process_substitution_mapfile_array():
+    # mapfile -t arr < <(...) populates an array from a process substitution.
+    _assert_equivalent(
+        "mapfile -t lines < <(printf 'one\\ntwo\\nthree\\n')\n"
+        "printf 'n=%d mid=%s\\n' \"${#lines[@]}\" \"${lines[1]}\"\n",
+        seeds=LAYER_SEEDS, intensity=1.0,
+    )

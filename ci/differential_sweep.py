@@ -191,6 +191,7 @@ def main(argv: list[str]) -> int:
                     known = is_known(c.name, m.name, BASH_VERSION)
                     if known:
                         rec["reason"] = known.reason
+                        rec["root_cause"] = known.root_cause
                         registered.append(rec)
                     else:
                         divergences.append(rec)
@@ -201,6 +202,13 @@ def main(argv: list[str]) -> int:
     grouped: dict[tuple[str, str], list[dict]] = {}
     for d in divergences:
         grouped.setdefault((d["case"], d["mutation"]), []).append(d)
+
+    # Collapse registered (tolerated) debt to the distinct underlying bugs it
+    # represents — the "make the number unambiguous" view: report N root causes,
+    # not N (case x mutation x seed) runs.
+    reg_by_cause: dict[str, list[dict]] = {}
+    for r in registered:
+        reg_by_cause.setdefault(r.get("root_cause", "unlabelled"), []).append(r)
 
     for (case, mut), recs in sorted(grouped.items()):
         seeds_hit = sorted({r["seed"] for r in recs})
@@ -227,6 +235,13 @@ def main(argv: list[str]) -> int:
         "checks": checks,
         "divergences": len(divergences),
         "registered": len(registered),
+        "root_causes": {
+            cause: {
+                "runs": len(recs),
+                "cases": sorted({r["case"] for r in recs}),
+            }
+            for cause, recs in sorted(reg_by_cause.items())
+        },
         "advisory_stderr": len(advisory),
         "engine_errors": engine_errors,
         "grouped": [
@@ -249,6 +264,30 @@ def main(argv: list[str]) -> int:
               "renamed identifiers in bash diagnostics):")
         for case, mut in adv_groups:
             print(f"  ~ {case} @ {mut}")
+        print()
+
+    # ── Root-cause grouping — never a raw count without grouping ──────
+    # Registered (tolerated) debt collapsed to the distinct underlying bugs.
+    if reg_by_cause:
+        print("ROOT CAUSE SUMMARY (registered debt, grouped by root cause):")
+        for cause in sorted(reg_by_cause, key=lambda c: (-len(reg_by_cause[c]), c)):
+            recs = reg_by_cause[cause]
+            cases = ", ".join(sorted({r["case"] for r in recs}))
+            print(f"  - {cause:30s} {len(recs):4d} failing runs   ({cases})")
+        print(f"  = {len(reg_by_cause)} distinct root cause(s) across "
+              f"{len(registered)} registered runs")
+        print()
+
+    # Unregistered divergences that still need a root cause, grouped by case —
+    # a bare "N failures" number invites panic and hides that it is few bugs.
+    if grouped:
+        by_case: dict[str, list[str]] = {}
+        for (case, mut) in grouped:
+            by_case.setdefault(case, []).append(mut)
+        print("NEEDS TRIAGE (unregistered divergences, grouped by case):")
+        for case in sorted(by_case):
+            print(f"  ! {case:30s} {len(by_case[case]):2d} mutation(s)")
+        print(f"  = {len(by_case)} distinct case(s) need a root cause / registry entry")
         print()
 
     print("+" + "-" * 62 + "+")

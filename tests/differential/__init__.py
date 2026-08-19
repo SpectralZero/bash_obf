@@ -35,7 +35,7 @@ from .bashrt import (
 from .classification import SideEffect, classify, is_runnable
 from .corpus import Case, generate, sample
 from .mutations import CORE_MUTATIONS, FULL_MUTATIONS, Mutation
-from .registry import KNOWN, KnownDivergence, is_known
+from .registry import KNOWN, KnownDivergence, is_known, root_cause_index
 
 __all__ = [
     "BASH",
@@ -60,4 +60,5 @@ __all__ = [
     "KNOWN",
     "KnownDivergence",
     "is_known",
+    "root_cause_index",
 ]
